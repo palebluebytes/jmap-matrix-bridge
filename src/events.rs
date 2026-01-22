@@ -1,0 +1,109 @@
+use axum::{
+    extract::{State, Json},
+    response::IntoResponse,
+};
+use tracing::{info, warn, error};
+use serde_json::Value; // Fallback for now due to import issues
+use crate::sender::JmapSender;
+
+#[derive(Clone)]
+pub struct AppState {
+    pub sender: Option<JmapSender>,
+    pub store: Option<crate::store::Store>,
+}
+
+pub async fn handle_transactions(
+    State(state): State<AppState>, 
+    Json(body): Json<serde_json::Value>,
+) -> impl IntoResponse {
+    info!("Received transaction");
+
+    if let Some(events) = body.get("events").and_then(|e| e.as_array()) {
+        for event in events {
+            let event_type = event.get("type").and_then(|t| t.as_str());
+            let content = event.get("content");
+            let sender = event.get("sender").and_then(|s| s.as_str());
+            
+            if let (Some("m.room.message"), Some(content), Some(sender_id)) = (event_type, content, sender) {
+                 info!("Received message from {}: {:?}", sender_id, content);
+                 if let Some("m.text") = content.get("msgtype").and_then(|t| t.as_str()) {
+                     if let Some(body_str) = content.get("body").and_then(|b| b.as_str()) {
+                         info!("Message body: {}", body_str);
+                         
+                         // Manual trigger: !email <to> <subject> <body>
+                         if body_str.starts_with("!email ") {
+                            let parts: Vec<&str> = body_str.splitn(4, ' ').collect();
+                            if parts.len() == 4 {
+                                let to = parts[1];
+                                let subject = parts[2];
+                                let email_body = parts[3];
+                                
+                                if let Some(sender) = &state.sender {
+                                    info!("Sending email to {}...", to);
+                                    let result = sender.send_email(to, subject, email_body).await;
+                                    match result {
+                                        Ok(_) => info!("Email sent successfully!"),
+                                        Err(e) => error!("Failed to send email: {}", e),
+                                    }
+                                } else {
+                                    warn!("Sender not configured (sender is None)");
+                                }
+                            }
+                         }
+                     }
+                 }
+            }
+        }
+    }
+    
+    axum::Json(serde_json::json!({}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::routing::put;
+    use axum::Router;
+    use tower::util::ServiceExt; // for oneshot
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+
+    #[tokio::test]
+    async fn test_matrix_transaction_parsing() {
+        let state = AppState { sender: None, store: None };
+        let app = Router::new()
+            .route("/transactions/:txn_id", put(handle_transactions))
+            .with_state(state);
+
+        // Mock a Matrix Transaction
+        let json_body = serde_json::json!({
+            "txn_id": "txn123",
+            "events": [
+                {
+                    "content": {
+                        "body": "Hello World",
+                        "msgtype": "m.text"
+                    },
+                    "event_id": "$event:localhost",
+                    "origin_server_ts": 1600000000000u64,
+                    "room_id": "!room:localhost",
+                    "sender": "@bob:localhost",
+                    "type": "m.room.message"
+                }
+            ]
+        });
+
+        let response = app.oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/transactions/txn123")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&json_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+}
