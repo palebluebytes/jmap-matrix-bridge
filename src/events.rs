@@ -128,3 +128,86 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 }
+
+    #[tokio::test]
+    async fn test_matrix_login_payload() {
+        let _ = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::INFO)
+            .with_test_writer()
+            .try_init();
+
+        use axum::routing::put;
+        use axum::Router;
+        use tower::util::ServiceExt;
+        use axum::body::Body;
+        use axum::http::{Request, StatusCode};
+
+        // Need to spin up a mock server for the login to hit
+        use wiremock::{MockServer, Mock, ResponseTemplate};
+        use wiremock::matchers::{method, path};
+        
+        let mock_server = MockServer::start().await;
+        // Mock JMAP Session so login succeeds
+        Mock::given(method("GET"))
+            // .and(path("/jmap/session")) // Relaxing path to debug 404
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                 "username": "user",
+                 "accounts": {},
+                 "primaryAccounts": {},
+                 "apiUrl": "http://127.0.0.1/api",
+                 "downloadUrl": "http://127.0.0.1/download",
+                 "uploadUrl": "http://127.0.0.1/upload",
+                 "eventSourceUrl": "http://127.0.0.1/events",
+                 "capabilities": {
+                    "urn:ietf:params:jmap:core": {},
+                    "urn:ietf:params:jmap:mail": {}
+                },
+                 "state": "s1"
+            })))
+            .mount(&mock_server)
+            .await;
+            
+        let store = crate::store::Store::new_in_memory().await.unwrap();
+        let matrix = crate::matrix::MatrixClient::new("http://localhost", "token");
+        let client_manager = Arc::new(ClientManager::new(store.clone(), matrix));
+        
+        let state = AppState { client_manager };
+        let app = Router::new()
+            .route("/transactions/:txn_id", put(handle_transactions))
+            .with_state(state);
+
+        let command = format!("!login user pass {}/jmap/session", mock_server.uri());
+
+        let json_body = serde_json::json!({
+            "txn_id": "txn_login",
+            "events": [
+                {
+                    "content": {
+                        "body": command,
+                        "msgtype": "m.text"
+                    },
+                    "sender": "@user:matrix.org",
+                    "type": "m.room.message"
+                }
+            ]
+        });
+
+        let response = app.oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/transactions/txn_login")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&json_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        
+        // Wait briefly for the async login task/call to complete?
+        // Actually handle_transactions awaits login(), so it should be done.
+        let users = store.get_all_users().await.unwrap();
+        assert_eq!(users.len(), 1);
+        assert_eq!(users[0].matrix_user_id, "@user:matrix.org");
+    }
