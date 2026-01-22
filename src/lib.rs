@@ -11,3 +11,5 @@ pub use matrix::*;
 pub use sender::*;
 pub use config::*;
 pub use store::*;
+pub mod client_manager;
+pub use client_manager::*;

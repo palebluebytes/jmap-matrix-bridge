@@ -1,6 +1,14 @@
 use sqlx::{sqlite::SqlitePoolOptions, Pool, Sqlite, Row};
 use anyhow::Result;
 
+#[derive(Clone, Debug, sqlx::FromRow)]
+pub struct RegisteredUser {
+    pub matrix_user_id: String,
+    pub jmap_username: String,
+    pub jmap_token: String,
+    pub jmap_url: String,
+}
+
 #[derive(Clone)]
 pub struct Store {
     pool: Pool<Sqlite>,
@@ -36,6 +44,12 @@ impl Store {
             CREATE TABLE IF NOT EXISTS message_mapping (
                 jmap_email_id TEXT PRIMARY KEY,
                 matrix_event_id TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS users (
+                matrix_user_id TEXT PRIMARY KEY,
+                jmap_username TEXT NOT NULL,
+                jmap_token TEXT NOT NULL,
+                jmap_url TEXT NOT NULL
             );"
         )
         .execute(&self.pool)
@@ -97,5 +111,37 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    pub async fn save_user(&self, user: &RegisteredUser) -> Result<()> {
+        sqlx::query(
+            "INSERT OR REPLACE INTO users (matrix_user_id, jmap_username, jmap_token, jmap_url) VALUES (?, ?, ?, ?)"
+        )
+        .bind(&user.matrix_user_id)
+        .bind(&user.jmap_username)
+        .bind(&user.jmap_token)
+        .bind(&user.jmap_url)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_user(&self, matrix_user_id: &str) -> Result<Option<RegisteredUser>> {
+        let user = sqlx::query_as::<_, RegisteredUser>(
+            "SELECT matrix_user_id, jmap_username, jmap_token, jmap_url FROM users WHERE matrix_user_id = ?"
+        )
+        .bind(matrix_user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(user)
+    }
+
+    pub async fn get_all_users(&self) -> Result<Vec<RegisteredUser>> {
+        let users = sqlx::query_as::<_, RegisteredUser>(
+            "SELECT matrix_user_id, jmap_username, jmap_token, jmap_url FROM users"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(users)
     }
 }

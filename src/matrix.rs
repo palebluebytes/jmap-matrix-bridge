@@ -2,6 +2,7 @@ use anyhow::{Result, Context};
 use tracing::info;
 use serde_json::json;
 
+#[derive(Clone)]
 pub struct MatrixClient {
     client: reqwest::Client,
     homeserver_url: String,

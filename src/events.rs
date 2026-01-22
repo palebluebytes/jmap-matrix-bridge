@@ -5,11 +5,12 @@ use axum::{
 use tracing::{info, warn, error};
 use serde_json::Value; // Fallback for now due to import issues
 use crate::sender::JmapSender;
+use crate::client_manager::ClientManager;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct AppState {
-    pub sender: Option<JmapSender>,
-    pub store: Option<crate::store::Store>,
+    pub client_manager: Arc<ClientManager>,
 }
 
 pub async fn handle_transactions(
@@ -30,23 +31,39 @@ pub async fn handle_transactions(
                      if let Some(body_str) = content.get("body").and_then(|b| b.as_str()) {
                          info!("Message body: {}", body_str);
                          
-                         // Manual trigger: !email <to> <subject> <body>
-                         if body_str.starts_with("!email ") {
+                         // Command Parsing
+                         if body_str.starts_with("!login ") {
+                             let parts: Vec<&str> = body_str.split_whitespace().collect();
+                             // Usage: !login username password [url]
+                             if parts.len() >= 3 {
+                                 let username = parts[1];
+                                 let password = parts[2];
+                                 let url = if parts.len() > 3 { parts[3] } else { "http://127.0.0.1:8080" }; // Default to local Stalwart
+
+                                 info!("Attempting login for {} at {}", username, url);
+                                 match state.client_manager.login(sender_id.to_string(), username.to_string(), password.to_string(), url.to_string()).await {
+                                     Ok(_) => info!("Login successful for {}", sender_id),
+                                     Err(e) => error!("Login failed: {}", e),
+                                 }
+                             }
+                         } else if body_str.starts_with("!email ") {
                             let parts: Vec<&str> = body_str.splitn(4, ' ').collect();
                             if parts.len() == 4 {
                                 let to = parts[1];
                                 let subject = parts[2];
                                 let email_body = parts[3];
                                 
-                                if let Some(sender) = &state.sender {
-                                    info!("Sending email to {}...", to);
+                                // Look up client for sender
+                                if let Some(client) = state.client_manager.get_client(sender_id).await {
+                                    let sender = JmapSender::new(client);
+                                    info!("Sending email to {} from {}...", to, sender_id);
                                     let result = sender.send_email(to, subject, email_body).await;
                                     match result {
                                         Ok(_) => info!("Email sent successfully!"),
                                         Err(e) => error!("Failed to send email: {}", e),
                                     }
                                 } else {
-                                    warn!("Sender not configured (sender is None)");
+                                    error!("User {} not logged in. Send !login <user> <pass> first.", sender_id);
                                 }
                             }
                          }
@@ -70,7 +87,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_matrix_transaction_parsing() {
-        let state = AppState { sender: None, store: None };
+        let store = crate::store::Store::new_in_memory().await.unwrap();
+        let matrix = crate::matrix::MatrixClient::new("http://localhost", "token");
+        let client_manager = Arc::new(ClientManager::new(store, matrix));
+        
+        let state = AppState { client_manager };
         let app = Router::new()
             .route("/transactions/:txn_id", put(handle_transactions))
             .with_state(state);

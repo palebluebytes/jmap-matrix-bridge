@@ -2,7 +2,8 @@ use clap::{Parser, Subcommand};
 use tracing::info;
 use serde::{Deserialize, Serialize};
 
-use jmap_matrix_bridge::{config::{self, Registration}, events, ingest, matrix, sender, store};
+use jmap_matrix_bridge::{config::{self, Registration}, events, ingest, matrix, sender, store, client_manager};
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -80,30 +81,28 @@ async fn main() -> anyhow::Result<()> {
             use base64::{Engine as _, engine::general_purpose};
             let encoded = general_purpose::STANDARD.encode(auth);
             
-            let client = jmap_client::client::Client::new()
-                .credentials(jmap_client::client::Credentials::Basic(encoded))
-                .connect(&jmap_url)
-                .await?;
-            let client = std::sync::Arc::new(client);
-
             let store = store::Store::new(&db).await?;
-
             let matrix = matrix::MatrixClient::new(&matrix_url, &matrix_as_token);
-            let poller = ingest::JmapPoller::new(client.clone(), matrix, store.clone()).await?;
-            let sender = sender::JmapSender::new(client.clone());
+            let client_manager = Arc::new(client_manager::ClientManager::new(store.clone(), matrix.clone()));
             
-            let state = events::AppState { sender: Some(sender), store: Some(store) };
-            
-            // Spawn polling loop
-            tokio::spawn(async move {
+            // Start manager (loads users from DB)
+            client_manager.start().await?;
 
-                loop {
-                    if let Err(e) = poller.poll().await {
-                        tracing::error!("Polling error: {}", e);
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-                }
-            });
+            // If CLI args provided credentials, auto-register/login a default user?
+            // For now, we will log a message that CLI credentials for single-user are deprecated 
+            // or we could auto-register valid credentials to a specific matrix ID if provided?
+            // Let's just log for now, as we moved to !login.
+            // But verify if we want to keep backward compat:
+            if !jmap_username.is_empty() && !jmap_token.is_empty() {
+                 info!("CLI credentials provided. Attempting to auto-login for @admin:{}", matrix_url); 
+                 // We don't know the exact matrix ID format without parsing config, 
+                 // but let's assume the user will !login.
+                 info!("Legacy CLI credentials are not automatically active. Please use !login in Matrix.");
+            }
+            
+            let state = events::AppState { client_manager };
+            
+            // Polling is handled by client_manager
 
             let app = axum::Router::new()
                 .route("/", axum::routing::get(|| async { "JMAP Bridge is running!" }))
