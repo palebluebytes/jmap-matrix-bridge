@@ -20,6 +20,7 @@ impl MatrixClient {
 
     pub async fn ensure_user_exists(&self, localpart: &str) -> Result<()> {
         info!("Ensuring Matrix user exists: {}", localpart);
+        // App Services authenticate via access_token query parameter in many implementations
         let url = format!("{}/_matrix/client/v3/register", self.homeserver_url);
         
         let body = json!({
@@ -27,12 +28,22 @@ impl MatrixClient {
             "type": "m.login.application_service"
         });
 
-        // We don't check the result too strictly because 400 M_USER_IN_USE is expected
-        let _ = self.client.post(&url)
-            .header("Authorization", format!("Bearer {}", self.as_token))
+        let resp = self.client.post(&url)
+            .query(&[("access_token", &self.as_token)])
             .json(&body)
             .send()
             .await?;
+
+        if resp.status().is_success() {
+            info!("User {} registered successfully", localpart);
+        } else if resp.status() == reqwest::StatusCode::BAD_REQUEST {
+            // Likely M_USER_IN_USE
+            info!("User {} already exists (or bad request), proceeding", localpart);
+        } else {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            tracing::warn!("Failed to register user {}: {} - {}", localpart, status, text);
+        }
             
         Ok(())
     }
@@ -53,7 +64,7 @@ impl MatrixClient {
         });
 
         let resp = self.client.post(&url)
-            .header("Authorization", format!("Bearer {}", self.as_token))
+            .query(&[("access_token", &self.as_token)])
             .query(&[("user_id", &user_id)]) // AS Impersonation
             .json(&body)
             .send()
@@ -83,7 +94,7 @@ impl MatrixClient {
         });
 
         let resp = self.client.post(&url)
-            .header("Authorization", format!("Bearer {}", self.as_token))
+            .query(&[("access_token", &self.as_token)])
             .query(&[("user_id", &user_id)]) 
             .json(&body)
             .send()
@@ -117,7 +128,7 @@ impl MatrixClient {
         });
 
         let resp = self.client.put(&url) // Use PUT for txn ID
-            .header("Authorization", format!("Bearer {}", self.as_token))
+            .query(&[("access_token", &self.as_token)])
             .query(&[("user_id", &user_id)]) 
             .json(&body)
             .send()

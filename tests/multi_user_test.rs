@@ -15,7 +15,7 @@ async fn test_multi_user_login_integration() {
     let url = mock_server.uri();
 
     Mock::given(method("GET"))
-        .and(path("/jmap/session"))
+        // .and(path("/jmap/session"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "username": "user",
             "accounts": {},

@@ -85,6 +85,11 @@ async fn main() -> anyhow::Result<()> {
             let matrix = matrix::MatrixClient::new(&matrix_url, &matrix_as_token);
             let client_manager = Arc::new(client_manager::ClientManager::new(store.clone(), matrix.clone()));
             
+            // Register bot user to ensure it exists in Conduit
+            if let Err(e) = matrix.ensure_user_exists("_jmap_bot").await {
+                tracing::warn!("Failed to ensure bot user exists: {}", e);
+            }
+            
             // Start manager (loads users from DB)
             client_manager.start().await?;
 
