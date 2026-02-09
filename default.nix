@@ -1,8 +1,9 @@
-{ lib
-, rustPlatform
-, pkg-config
-, openssl
-, sqlite
+{
+  lib,
+  rustPlatform,
+  pkg-config,
+  openssl,
+  sqlite,
 }:
 
 rustPlatform.buildRustPackage {
