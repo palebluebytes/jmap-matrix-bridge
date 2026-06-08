@@ -1,8 +1,16 @@
-use wiremock::{MockServer, Mock, ResponseTemplate};
-use wiremock::matchers::{method, path};
+#![allow(
+    clippy::unwrap_used,
+    clippy::str_to_string,
+    clippy::too_many_lines,
+    clippy::unreadable_literal,
+    clippy::uninlined_format_args
+)]
+
+use jmap_matrix_bridge::sender::JmapSender;
 use serde_json::json;
 use std::sync::Arc;
-use jmap_matrix_bridge::sender::JmapSender;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
 async fn test_sender_flow() {
@@ -16,8 +24,8 @@ async fn test_sender_flow() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "username": "user",
             "accounts": {
-                "A123": { 
-                    "name": "user", 
+                "A123": {
+                    "name": "user",
                     "isPersonal": true,
                     "isReadOnly": false,
                      "accountCapabilities": {
@@ -47,26 +55,35 @@ async fn test_sender_flow() {
         .await;
 
     // 3. Mock API Endpoint (/api)
-    // We expect 3 distinct calls or a batch. 
+    // We expect 3 distinct calls or a batch.
     // Call 1: Identity Query (fetch primary identity)
     Mock::given(method("POST"))
         .and(path("/api"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "sessionState": "s1",
             "methodResponses": [
-                ["Identity/get", { 
-                    "accountId": "A123", 
-                    "state": "s1", 
-                    "list": [{ "id": "ID_BOB", "email": "bob@example.com", "name": "Bob" }] 
-                }, "0"],
                 ["Email/set", { 
                     "accountId": "A123", 
-                    "created": { "c0": { "id": "MSG_NEW", "blobId": "b1", "threadId": "t1", "size": 100 } } 
+                    "oldState": "s0",
+                    "newState": "s1",
+                    "created": { "draft": { "id": "MSG_NEW", "blobId": "b1", "threadId": "t1", "size": 100 } },
+                    "updated": {},
+                    "destroyed": [],
+                    "notCreated": {},
+                    "notUpdated": {},
+                    "notDestroyed": {}
                 }, "0"],
                 ["EmailSubmission/set", { 
-                    "accountId": "A123", 
-                    "created": { "c0": { "id": "SUB_NEW" } } 
-                }, "0"]
+                    "accountId": "A123",
+                    "oldState": "s0",
+                    "newState": "s1",
+                    "created": { "sub": { "id": "SUB_NEW" } },
+                    "updated": {},
+                    "destroyed": [],
+                    "notCreated": {},
+                    "notUpdated": {},
+                    "notDestroyed": {}
+                }, "1"]
             ]
         })))
         .mount(&mock_server)
@@ -74,11 +91,13 @@ async fn test_sender_flow() {
 
     // 4. Setup Client
     let client = jmap_client::client::Client::new()
-        .credentials(jmap_client::client::Credentials::Basic("dXNlcjpwYXNz".to_string()))
+        .credentials(jmap_client::client::Credentials::Basic(
+            "dXNlcjpwYXNz".to_string(),
+        ))
         .connect(&url)
         .await
         .expect("Failed to connect to mock server");
-    
+
     let client = Arc::new(client);
     let sender = JmapSender::new(client);
 
@@ -87,8 +106,10 @@ async fn test_sender_flow() {
     // In reality, these might be separate requests. But correct generic matching should work for a happy path.
     // Ideally we match specific method calls in the body, but wiremock body matching is complex.
     // We assume the client makes calls that our catch-all satisfies.
-    
-    let result = sender.send_email("alice@example.com", "Hello", "Body content").await;
-    
+
+    let result = sender
+        .send_email("alice@example.com", "Hello", "Body content", vec![])
+        .await;
+
     assert!(result.is_ok(), "Failed to send email: {:?}", result.err());
 }

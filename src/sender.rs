@@ -1,48 +1,397 @@
-use std::sync::Arc;
-use anyhow::{Result, Context};
-use jmap_client::client::Client;
-use jmap_client::core::set::SetObject;
-use jmap_client::email::EmailBodyPart;
-use jmap_client::core::response::EmailSetResponse;
+//! JMAP email sending.
+//!
+//! [`JmapSender`] wraps the JMAP client and provides a clean API for composing
+//! and submitting emails.  Both fresh emails and replies are built through the
+//! same internal [`EmailBuilder`], eliminating code duplication.
 
+use anyhow::{Context, Result};
+use futures_util::StreamExt;
+use matrix_sdk::ruma::events::room::MediaSource;
+use matrix_sdk::ruma::events::room::message::{MessageType, RoomMessageEventContent};
+use std::sync::Arc;
+
+use jmap_client::Method;
+use jmap_client::blob::upload::UploadResponse;
+use jmap_client::client::Client;
+use jmap_client::core::request::Arguments;
+use jmap_client::email::{EmailBodyPart, EmailBodyValue};
+
+// ─── Public surface ───────────────────────────────────────────────────────────
+
+#[derive(Debug, serde::Serialize, serde::Deserialize, Clone)]
+pub struct AttachmentInfo {
+    pub blob_id: String,
+    pub name: String,
+    pub mime_type: String,
+}
+
+/// Thin wrapper around [`Client`] that exposes high-level email operations.
 #[derive(Clone)]
 pub struct JmapSender {
-    client: Arc<Client>,
+    pub(crate) client: Arc<Client>,
+}
+
+impl std::fmt::Debug for JmapSender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JmapSender").finish_non_exhaustive()
+    }
 }
 
 impl JmapSender {
-    pub fn new(client: Arc<Client>) -> Self {
+    pub const fn new(client: Arc<Client>) -> Self {
         Self { client }
     }
 
-    pub async fn send_email(&self, to: &str, subject: &str, body: &str) -> Result<()> {
-        // 1. Create the email object (Draft)
+    /// Send a fresh email to `to`.  Returns the JMAP email ID on success.
+    pub async fn send_email(
+        &self,
+        to: &str,
+        subject: &str,
+        body: &str,
+        attachments: Vec<AttachmentInfo>,
+    ) -> Result<String> {
+        self.submit(EmailBuilder {
+            to,
+            subject,
+            body,
+            in_reply_to: None,
+            references: &[],
+            attachments,
+        })
+        .await
+    }
+
+    /// Send a reply to an existing email thread.  Returns the new JMAP email ID.
+    pub async fn reply_to_email(
+        &self,
+        to: &str,
+        subject: &str,
+        body: &str,
+        in_reply_to: &str,
+        _thread_id: &str,
+        attachments: Vec<AttachmentInfo>,
+    ) -> Result<String> {
+        self.submit(EmailBuilder {
+            to,
+            subject,
+            body,
+            in_reply_to: Some(in_reply_to),
+            references: &[in_reply_to],
+            attachments,
+        })
+        .await
+    }
+
+    /// Returns the server-advertised maximum upload size in bytes.
+    ///
+    /// Returns `0` when the capability is absent (treat as unconstrained).
+    #[must_use]
+    pub fn max_upload_size(&self) -> usize {
+        self.client.session().core_capabilities().map_or(
+            0,
+            jmap_client::core::session::CoreCapabilities::max_size_upload,
+        )
+    }
+
+    /// Upload raw bytes to the JMAP blob store.
+    ///
+    /// Enforces the server's `maxSizeUpload` limit before making a network
+    /// request, returning a human-readable [`Err`] when the file is too large
+    /// so callers can surface it directly to the Matrix user.
+    pub async fn upload_attachment(&self, file_bytes: &[u8], mime_type: &str) -> Result<String> {
+        let max = self.max_upload_size();
+        if max > 0 && file_bytes.len() > max {
+            anyhow::bail!(
+                "Attachment too large ({} bytes). The JMAP server limit is {} ({}).",
+                file_bytes.len(),
+                max,
+                human_bytes(max),
+            );
+        }
+
+        let mut resp: UploadResponse = self
+            .client
+            .upload(None, file_bytes.to_vec(), Some(mime_type))
+            .await?;
+        Ok(resp.take_blob_id())
+    }
+
+    /// Upload a stream of bytes directly to the JMAP blob store (streaming upload).
+    ///
+    /// This prevents high concurrent RAM usage / memory spikes (OOM risk) when
+    /// transferring larger attachments from Matrix to JMAP.
+    pub async fn upload_attachment_stream<S, E>(&self, stream: S, mime_type: &str) -> Result<String>
+    where
+        S: futures_util::Stream<Item = Result<bytes::Bytes, E>> + Send + Sync + 'static,
+        E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    {
+        static UPLOAD_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+        use jmap_client::core::session::URLPart;
+        let account_id = self.client.default_account_id();
+        let mut upload_url = String::new();
+
+        for part in self.client.upload_url() {
+            match part {
+                URLPart::Value(value) => {
+                    upload_url.push_str(value);
+                }
+                URLPart::Parameter(_param) => {
+                    upload_url.push_str(account_id);
+                }
+            }
+        }
+
+        let client = UPLOAD_CLIENT.get_or_init(reqwest::Client::new);
+
+        let body = reqwest::Body::wrap_stream(stream);
+        let mut req = client
+            .post(&upload_url)
+            .header(reqwest::header::CONTENT_TYPE, mime_type)
+            .timeout(self.client.timeout());
+
+        for (name, value) in self.client.headers() {
+            req = req.header(name.clone(), value.clone());
+        }
+
+        let resp = req.body(body).send().await?;
+
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("JMAP media upload failed: {status} - {text}");
+        }
+
+        let mut upload_resp: UploadResponse = resp.json().await?;
+        Ok(upload_resp.take_blob_id())
+    }
+
+    /// Extract media, download it from Matrix, check its size limits, wrap it in a
+    /// stream with size verification (OOM protection), apply filename/mime fallbacks,
+    /// and upload it to the JMAP server.
+    pub async fn upload_matrix_media(
+        &self,
+        matrix: &crate::matrix::MatrixClient,
+        content: &RoomMessageEventContent,
+    ) -> Result<AttachmentInfo> {
+        let mxc_uri = match &content.msgtype {
+            MessageType::File(f) => match &f.source {
+                MediaSource::Plain(url) => Some(url),
+                MediaSource::Encrypted(_) => None,
+            },
+            MessageType::Image(i) => match &i.source {
+                MediaSource::Plain(url) => Some(url),
+                MediaSource::Encrypted(_) => None,
+            },
+            MessageType::Audio(a) => match &a.source {
+                MediaSource::Plain(url) => Some(url),
+                MediaSource::Encrypted(_) => None,
+            },
+            MessageType::Video(v) => match &v.source {
+                MediaSource::Plain(url) => Some(url),
+                MediaSource::Encrypted(_) => None,
+            },
+            _ => None,
+        }
+        .context("No plain media URL found (or encrypted media is unsupported)")?;
+
+        let max_size = self.max_upload_size();
+
+        // 1. Check declared size first
+        let declared_size = match &content.msgtype {
+            MessageType::Image(img) => img.info.as_ref().and_then(|i| i.size),
+            MessageType::File(file) => file.info.as_ref().and_then(|i| i.size),
+            MessageType::Audio(audio) => audio.info.as_ref().and_then(|i| i.size),
+            MessageType::Video(video) => video.info.as_ref().and_then(|i| i.size),
+            _ => None,
+        };
+
+        if let Some(size) = declared_size {
+            let size_bytes = usize::try_from(u64::from(size)).unwrap_or(usize::MAX);
+            if max_size > 0 && size_bytes > max_size {
+                anyhow::bail!(
+                    "Media attachment exceeds the maximum size allowed by the JMAP mail server (limit: {}). Upload aborted.",
+                    human_bytes(max_size)
+                );
+            }
+        }
+
+        // 2. Download from Matrix (Streaming)
+        let (stream, filename, mime_type) = matrix.download_media_stream(mxc_uri.as_str()).await?;
+
+        // 3. Wrap stream with dynamic size checking (to prevent OOM)
+        let mut total_bytes = 0;
+        let limit_stream = stream.map(move |chunk| match chunk {
+            Ok(bytes) => {
+                total_bytes += bytes.len();
+                if max_size > 0 && total_bytes > max_size {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        "File transfer exceeded maximum JMAP upload limit",
+                    ))
+                } else {
+                    Ok(bytes)
+                }
+            }
+            Err(e) => Err(std::io::Error::other(e.to_string())),
+        });
+
+        // 4. Use content bodies / mime types as safe fallbacks
+        let filename_to_use = if filename.is_empty() || filename == "attachment" {
+            content.msgtype.body().to_owned()
+        } else {
+            filename
+        };
+
+        let mime_type_to_use = if mime_type == "application/octet-stream" {
+            let event_mime = match &content.msgtype {
+                MessageType::File(f) => f.info.as_ref().and_then(|i| i.mimetype.as_deref()),
+                MessageType::Image(i) => i.info.as_ref().and_then(|i| i.mimetype.as_deref()),
+                MessageType::Audio(a) => a.info.as_ref().and_then(|i| i.mimetype.as_deref()),
+                MessageType::Video(v) => v.info.as_ref().and_then(|i| i.mimetype.as_deref()),
+                _ => None,
+            };
+            event_mime.unwrap_or(&mime_type).to_owned()
+        } else {
+            mime_type
+        };
+
+        // 5. Upload to JMAP
+        let blob_id = self
+            .upload_attachment_stream(limit_stream, &mime_type_to_use)
+            .await?;
+
+        Ok(AttachmentInfo {
+            blob_id,
+            name: filename_to_use,
+            mime_type: mime_type_to_use,
+        })
+    }
+
+    /// Mark an email as read in JMAP by adding the `$seen` keyword.
+    pub async fn mark_as_read(&self, email_id: &str) -> Result<()> {
         let mut request = self.client.build();
-        
-        let draft_ref = request.set_email().create()
-            .to([to]) // Assuming &str implements Into<EmailAddress>
-            .subject(subject)
-            .text_body(EmailBodyPart::new().part_id("body"))
-            .body_value("body".to_string(), body)
-            .create_id()
-            .unwrap();
+        {
+            let params = request.params(Method::SetEmail);
+            let mut args = Arguments::email_set(params);
+            args.email_set_mut().update(email_id).keyword("$seen", true);
+            request.add_method_call(Method::SetEmail, args);
+        }
 
-        let mut response = request.send_single::<EmailSetResponse>().await?;
-        let email_id = response.created(&draft_ref)
-            .context("Failed to create draft email")?
-            .id()
-            .context("Server returned no ID for created email")?
-            .to_string();
-
-        // 2. Submit the email (using server default identity)
-        let mut request = self.client.build();
-        let _submission_ref = request.set_email_submission().create()
-            .email_id(email_id)
-            .create_id()
-            .unwrap();
-
-        request.send_single::<jmap_client::core::response::EmailSubmissionSetResponse>().await?;
-
+        request.send().await?;
         Ok(())
+    }
+}
+
+// ─── Internal helpers ─────────────────────────────────────────────────────────
+
+/// All the data needed to build a JMAP `Email/set` + `EmailSubmission/set` batch.
+struct EmailBuilder<'a> {
+    to: &'a str,
+    subject: &'a str,
+    body: &'a str,
+    in_reply_to: Option<&'a str>,
+    references: &'a [&'a str],
+    attachments: Vec<AttachmentInfo>,
+}
+
+impl JmapSender {
+    /// Build and submit a JMAP batch request, returning the created email's ID.
+    async fn submit(&self, params: EmailBuilder<'_>) -> Result<String> {
+        let mut request = self.client.build();
+
+        // — Email/set —
+        request.add_method_call(
+            Method::SetEmail,
+            Arguments::email_set(request.params(Method::SetEmail)),
+        );
+        let email_set = request
+            .method_calls
+            .last_mut()
+            .expect("just pushed")
+            .1
+            .email_set_mut();
+
+        let email = email_set.create_with_id("draft");
+        email.subject(params.subject);
+        email.to(vec![params.to]);
+
+        if let Some(reply_to) = params.in_reply_to {
+            email.in_reply_to(vec![reply_to.to_owned()]);
+        }
+        if !params.references.is_empty() {
+            email.references(params.references.iter().map(ToString::to_string));
+        }
+
+        // Body
+        let body_part = EmailBodyPart::new()
+            .part_id("body")
+            .content_type("text/plain");
+        email.body_structure(body_part.into());
+        email.body_value(
+            "body".to_owned(),
+            EmailBodyValue::from(params.body.to_owned()),
+        );
+
+        // Attachments
+        for att in params.attachments {
+            let part = EmailBodyPart::new()
+                .blob_id(att.blob_id)
+                .name(att.name)
+                .content_type(att.mime_type);
+            email.attachment(part);
+        }
+
+        // — EmailSubmission/set —
+        request.add_method_call(
+            Method::SetEmailSubmission,
+            Arguments::email_submission_set(request.params(Method::SetEmailSubmission)),
+        );
+        let submission_set = request
+            .method_calls
+            .last_mut()
+            .expect("just pushed")
+            .1
+            .email_submission_set_mut();
+
+        let submission = submission_set.create_with_id("sub");
+        submission.email_id("#draft");
+
+        let mail_from = self.client.session().username().to_owned();
+        let rcpt_to = vec![params.to.to_owned()];
+        submission.envelope(mail_from, rcpt_to);
+
+        // — Send and unpack —
+        let mut response = request.send().await?;
+        let mut email_set_resp = response.method_response_by_pos(0).unwrap_set_email()?;
+        let created = email_set_resp.created("draft")?;
+        let email_id = created
+            .id()
+            .context("JMAP response did not include an ID for the created email")?;
+
+        Ok(email_id.to_owned())
+    }
+}
+
+// ─── Utilities ────────────────────────────────────────────────────────────────
+
+/// Format a byte count as a human-readable string (e.g. `"5.0 MB"`).
+#[must_use]
+#[allow(clippy::cast_precision_loss)]
+pub fn human_bytes(bytes: usize) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+    let mut size = bytes as f64;
+    let mut unit = UNITS[0];
+    for u in UNITS.iter().skip(1) {
+        if size < 1024.0 {
+            break;
+        }
+        size /= 1024.0;
+        unit = u;
+    }
+    // Avoid spurious ".0" for round numbers.
+    if size.fract() < 0.05 {
+        format!("{size:.0} {unit}")
+    } else {
+        format!("{size:.1} {unit}")
     }
 }

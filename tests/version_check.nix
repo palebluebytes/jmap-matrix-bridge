@@ -6,5 +6,5 @@ in
 pkgs.testers.testVersion {
   package = bridge;
   command = "jmap-matrix-bridge --help";
-  version = "0.1.0";
+  version = "0.2.0";
 }
