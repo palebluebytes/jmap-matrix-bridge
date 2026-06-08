@@ -1,0 +1,67 @@
+# 🤖 AGENT DIRECTIVES: JMAP-Matrix Bridge
+
+**Context:** This is a Rust-based Matrix Application Service bridging JMAP email to Matrix rooms.
+**Prime Directive:** You are an autonomous AI entity operating in this repository. You must adhere strictly to the workflows, architectural boundaries, and toolchains defined below. Do not guess commands, and do not ignore environmental constraints.
+
+---
+
+## 1. The Environment: Nix Flake (STRICT BOUNDARY)
+
+This repository is completely managed by a **Nix flake**. This means the development environment is fully declarative, reproducible, and sandboxed.
+
+* **DO NOT** attempt to install any system packages (`apt`, `brew`, `apk`).
+* **DO NOT** use `rustup` to change toolchains or install components.
+* **DO NOT** use `cargo install` for global binaries.
+* **All tools** (Rust compiler, `cargo-nextest`, `bacon`, `just`, etc.) and system dependencies are pre-provisioned via the `flake.nix` development shell (`nix develop` or `direnv`).
+* **If a system dependency is missing:** You must modify the `flake.nix` inputs/packages. Do not attempt to work around it locally.
+
+---
+
+## 2. Toolchain & Workflow (Your "Hands" and "Eyes")
+
+Do NOT run raw `cargo` or `bash` commands unless explicitly required. Your primary interface for interacting with this codebase is `just`. Run `just` at any time to list available commands.
+
+### The Inner Loop (Writing & Verifying)
+When modifying source code, choose your feedback loop based on your execution capabilities:
+* **For agents with background/asynchronous execution:** Start your session by running `bacon --job check > bacon.log &`. Monitor `bacon.log` for real-time compiler feedback as you edit files. 
+* **For turn-based/synchronous agents:** Run `just check` after every logical file edit. Do not proceed to testing or further edits until `just check` passes cleanly.
+
+### The Outer Loop (Testing & Fixing)
+* **Testing:** ALWAYS use `just nextest` to verify logic. It utilizes `cargo-nextest` for heavy parallelization. Do not use standard `cargo test` unless `nextest` fails due to an unknown runner incompatibility.
+* **Linting:** Run `just lint` before considering a task complete. If you encounter Clippy warnings, run `just fix` to automatically resolve safe lints before manually fixing the rest.
+* **Formatting:** Run `cargo fmt` before finalizing any file modifications.
+
+---
+
+## 3. Architectural Rules & Code Style
+
+When generating or refactoring code, you MUST adhere to the following constraints:
+
+### Language & Safety
+* **Edition:** Rust 2024.
+* **Safety:** `#![forbid(unsafe_code)]` is enforced at the workspace level. Do not attempt to write or suggest `unsafe` blocks.
+* **Lints:** We use `clippy::all`, `clippy::pedantic`, `clippy::nursery`, and `clippy::cargo`. Code must compile cleanly against these.
+    * *Exception:* Test modules (`cfg(test)`) may use `#[allow(clippy::unwrap_used)]`.
+
+### Error Handling
+* **Libraries (`src/lib/` etc):** MUST use `thiserror` for structured, typed error enums.
+* **Binaries (`src/main.rs` etc):** MUST use `anyhow` for rapid error propagation and context.
+
+### Naming Conventions
+* `snake_case` for functions, variables, and modules.
+* `PascalCase` for types, structs, and traits.
+* `SCREAMING_SNAKE_CASE` for constants and statics.
+
+### Concurrency & State
+* **Async Runtime:** `tokio` (full features). Ensure all IO and network calls are non-blocking.
+* **Shared State:** Use `dashmap::DashMap` wrapped in `std::sync::Arc` for shared mutable state. Avoid `std::sync::RwLock` or `std::sync::Mutex` unless absolutely necessary for granular control.
+* **Persistence:** Use `sqlx` with SQLite. Do not use ORMs like Diesel or SeaORM. All queries should use `sqlx::query!` macros for compile-time verification.
+    * **CRITICAL SQLX RULE:** Because CI runs in an isolated Nix sandbox (`SQLX_OFFLINE=true`), anytime you add or modify a `sqlx::query!` macro, you MUST run `just db-prepare` to regenerate the `sqlx-data.json` file. If you do not do this, the Nix build will instantly fail.
+
+---
+
+## 4. Testing & CI Pipeline
+
+* **Execution:** ALWAYS run `just nextest` to verify your changes. 
+* **Mocking:** When writing NEW integration tests inside the `tests/` directory, you MUST use `wiremock` to mock HTTP endpoints (JMAP or Matrix homeservers). Do not make live network requests. Your tests must be able to pass inside an offline Nix sandbox.
+* **CI / Release Builds:** The final source of truth for a successful build is the Nix sandbox. `nix build` compiles the production package, while `craneLib.cargoNextest` handles parallelized checks inside the isolated Nix build environment.
