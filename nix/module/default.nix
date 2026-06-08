@@ -7,23 +7,28 @@
 
 let
   cfg = config.services.jmap-bridge;
-  # Assuming the package is available in pkgs or we refer to it by path if not in overlay
-  # For now, we'll try to use pkgs.callPackage if it's not strictly in pkgs yet.
-  # But ideally it should be in the overlay.
-  # Let's assume the user will add it to pkgs.
-  # Or we can refer to it directly if we know the path, but that's messy.
-  # We will assume it will be added to pkgs via overlay or similar.
-  # Fallback: callPackage directly.
-  package = pkgs.jmap-matrix-bridge;
 in
 {
   options.services.jmap-bridge = {
     enable = lib.mkEnableOption "JMAP Matrix Bridge";
 
+    package = lib.mkOption {
+      type = lib.types.package;
+      default = pkgs.jmap-matrix-bridge;
+      defaultText = lib.literalExpression "pkgs.jmap-matrix-bridge";
+      description = "The JMAP Matrix Bridge package to use.";
+    };
+
     environmentFile = lib.mkOption {
       type = lib.types.nullOr lib.types.path;
       default = null;
       description = "File containing secrets (like MATRIX_AS_TOKEN)";
+    };
+
+    encryptionKeyFile = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "File containing the 32-byte base64 encoded encryption key for credentials at rest";
     };
 
     databaseUrl = lib.mkOption {
@@ -44,122 +49,111 @@ in
       description = "JMAP Server URL";
     };
 
-    username = lib.mkOption {
-      type = lib.types.str;
-      description = "JMAP Username";
-    };
-
-    token = lib.mkOption {
-      type = lib.types.str;
-      default = "";
-      description = "JMAP Token/Password (WARNING: visible in world-readable Nix store if set here)";
-    };
-
     matrixUrl = lib.mkOption {
       type = lib.types.str;
       default = "http://127.0.0.1:6167";
       description = "Matrix Homeserver URL";
     };
 
-    # Registration Configuration
-    registration = {
-      enable = lib.mkEnableOption "Generate registration.yaml via sops.templates";
-
-      asToken = lib.mkOption {
-        type = lib.types.str;
-        description = "Application Service Token (pass config.sops.placeholder...)";
-      };
-
-      hsToken = lib.mkOption {
-        type = lib.types.str;
-        description = "Homeserver Token (pass config.sops.placeholder...)";
-      };
-
-      owner = lib.mkOption {
-        type = lib.types.str;
-        default = "root";
-        description = "Owner of the generated registration file (e.g. matrix-synapse user)";
-      };
-
-      group = lib.mkOption {
-        type = lib.types.str;
-        default = "root";
-        description = "Group of the generated registration file";
-      };
-
-      path = lib.mkOption {
-        type = lib.types.path;
-        readOnly = true;
-        default = config.sops.templates."jmap-registration.yaml".path;
-        description = "Path to the generated secure registration file";
-      };
+    extraArgs = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      description = "Additional command-line arguments to pass to the bridge service.";
     };
+
+    logLevel = lib.mkOption {
+      type = lib.types.str;
+      default = "info";
+      description = "The logging level for the bridge (error, warn, info, debug, trace)";
+    };
+
   };
 
   config = lib.mkIf cfg.enable {
-    # Expose the path for other modules to consume
-    # usage: config.services.jmap-bridge.registration.path
-
-    # Define the template if enabled
-    sops.templates."jmap-registration.yaml" = lib.mkIf cfg.registration.enable {
-      inherit (cfg.registration) owner;
-      inherit (cfg.registration) group;
-      content = ''
-        id: jmap-bridge
-        url: http://127.0.0.1:${toString cfg.port}
-        as_token: ${cfg.registration.asToken}
-        hs_token: ${cfg.registration.hsToken}
-        sender_localpart: _jmap_bot
-        namespaces:
-          users:
-          - exclusive: true
-            regex: '@_jmap_.*'
-          aliases: []
-          rooms: []
-      '';
-    };
+    assertions = [
+      {
+        assertion =
+          cfg.encryptionKeyFile != null
+          -> (lib.hasPrefix "/" cfg.encryptionKeyFile && !lib.isStorePath (toString cfg.encryptionKeyFile));
+        message = "services.jmap-bridge.encryptionKeyFile must be an absolute path on the target host and NOT a Nix store path (to avoid exposing secrets).";
+      }
+    ];
 
     systemd.services.jmap-bridge = {
       description = "JMAP Matrix Bridge";
       wantedBy = [ "multi-user.target" ];
-      after = [ "network.target" ];
+      after = [
+        "network.target"
+        "matrix-conduit.service"
+        "matrix-synapse.service"
+        "stalwart.service"
+      ]
+      ++ lib.optionals (cfg.encryptionKeyFile != null) [ "sops-install-secrets.service" ];
+
+      wants = lib.optionals (cfg.encryptionKeyFile != null) [ "sops-install-secrets.service" ];
+
       environment = {
         DATABASE_URL = "sqlite:${cfg.databaseUrl}";
         JMAP_URL = cfg.url;
-        JMAP_USERNAME = cfg.username;
         MATRIX_URL = cfg.matrixUrl;
-      }
-      // lib.optionalAttrs (cfg.token != "") {
-        JMAP_TOKEN = cfg.token;
       };
+
       serviceConfig = {
         ExecStart = ''
-          ${package}/bin/jmap-matrix-bridge run \
+          ${cfg.package}/bin/jmap-matrix-bridge --log-level ${cfg.logLevel} run \
             --db "sqlite:${cfg.databaseUrl}" \
-            --port ${toString cfg.port}
+            --port ${toString cfg.port} \
+            ${
+              lib.optionalString (
+                cfg.encryptionKeyFile != null
+              ) "--encryption-key-file \${CREDENTIALS_DIRECTORY}/encryption-key"
+            } \
+            ${lib.escapeShellArgs cfg.extraArgs}
         '';
         Restart = "always";
         RestartSec = "10s";
+
+        # State & Directory management
         StateDirectory = "jmap-bridge";
         WorkingDirectory = "/var/lib/jmap-bridge";
+
+        # Secrets / Environment
         EnvironmentFile = lib.mkIf (cfg.environmentFile != null) cfg.environmentFile;
-        # Hardening
-        DynamicUser = false;
+        LoadCredential = lib.optionals (cfg.encryptionKeyFile != null) [
+          "encryption-key:${cfg.encryptionKeyFile}"
+        ];
+
+        # Systemd Hardening & Sandboxing
+        DynamicUser = true;
         User = "jmap-bridge";
         Group = "jmap-bridge";
-        ReadWritePaths = [ "/var/lib/jmap-bridge" ];
+
         ProtectSystem = "strict";
         ProtectHome = true;
         PrivateTmp = true;
+        PrivateDevices = true;
+        PrivateUsers = true;
+        CapabilityBoundingSet = "";
+        NoNewPrivileges = true;
+        ProtectControlGroups = true;
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        RestrictAddressFamilies = [
+          "AF_INET"
+          "AF_INET6"
+          "AF_UNIX"
+        ];
+        RestrictNamespaces = true;
+        RestrictRealtime = true;
+        RestrictSUIDSGID = true;
+        MemoryDenyWriteExecute = true;
+        LockPersonality = true;
+        SystemCallFilter = [
+          "@system-service"
+          "~@privileged"
+        ];
       };
     };
-    users.users.jmap-bridge = {
-      isSystemUser = true;
-      group = "jmap-bridge";
-      description = "JMAP Matrix Bridge service user";
-    };
-
-    users.groups.jmap-bridge = { };
 
   };
 }
