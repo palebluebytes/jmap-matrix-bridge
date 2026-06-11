@@ -150,6 +150,7 @@ in
       wantedBy = [ "multi-user.target" ];
       after = [
         "network.target"
+        "tuwunel.service"
         "matrix-conduit.service"
         "matrix-synapse.service"
         "stalwart.service"
