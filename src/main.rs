@@ -95,7 +95,78 @@ enum Commands {
         /// Path to a file containing the AES-256 encryption key (32 bytes, base64-encoded)
         #[arg(long, env = "ENCRYPTION_KEY_FILE")]
         encryption_key_file: Option<String>,
+
+        /// Declaratively provision a bridge user at startup. Repeatable.
+        ///
+        /// Value is a comma-separated list of `key=value` pairs. Keys:
+        ///   - `mxid`       (required) Matrix user id, e.g. `@you:example.com`
+        ///   - `username`   (required) JMAP username
+        ///   - `url`        (optional) JMAP session URL; defaults to `--jmap-url`
+        ///   - `token-file` (preferred) path to a file holding the JMAP token
+        ///   - `token`      (alternative) the JMAP token inline (visible in argv)
+        ///
+        /// Example:
+        ///   --user "mxid=@you:example.com,username=you,token-file=/run/secrets/jmap"
+        #[arg(long = "user", value_name = "SPEC")]
+        users: Vec<String>,
     },
+}
+
+/// A declaratively-provisioned bridge user, parsed from a `--user` spec.
+struct UserSpec {
+    mxid: String,
+    username: String,
+    /// JMAP session URL, or `None` to fall back to the global `--jmap-url`.
+    url: Option<String>,
+    token: String,
+}
+
+/// Parse a single `--user` spec (`key=value,key=value,...`).
+///
+/// The token is taken from `token-file` (read from disk, trimmed) when present,
+/// otherwise from an inline `token=` value.
+fn parse_user_spec(spec: &str) -> anyhow::Result<UserSpec> {
+    let mut mxid = None;
+    let mut username = None;
+    let mut url = None;
+    let mut token = None;
+    let mut token_file = None;
+
+    for segment in spec.split(',') {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            continue;
+        }
+        let (key, value) = segment
+            .split_once('=')
+            .with_context(|| format!("invalid --user segment '{segment}', expected key=value"))?;
+        let value = value.trim().to_owned();
+        match key.trim() {
+            "mxid" => mxid = Some(value),
+            "username" => username = Some(value),
+            "url" => url = Some(value),
+            "token" => token = Some(value),
+            "token-file" => token_file = Some(value),
+            other => anyhow::bail!("unknown --user key '{other}'"),
+        }
+    }
+
+    let token = if let Some(path) = token_file {
+        std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read --user token-file '{path}'"))?
+            .trim()
+            .to_owned()
+    } else {
+        token.context("--user requires either token-file or token")?
+    };
+    anyhow::ensure!(!token.is_empty(), "--user token is empty");
+
+    Ok(UserSpec {
+        mxid: mxid.context("--user requires mxid")?,
+        username: username.context("--user requires username")?,
+        url: url.filter(|u| !u.is_empty()),
+        token,
+    })
 }
 
 #[tokio::main]
@@ -129,6 +200,7 @@ async fn main() -> anyhow::Result<()> {
             port,
             encryption_key,
             encryption_key_file,
+            users,
         } => {
             info!("Starting JMAP Bridge on port {} with db: {}", port, db);
 
@@ -292,6 +364,33 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
+            // Declaratively provision any users passed via --user. This is the
+            // multi-user, config-driven path (the spec's token comes from a file
+            // so it never lands in argv). Re-running on each boot refreshes the
+            // stored credentials from config; a connect failure is non-fatal so
+            // a temporary JMAP outage cannot wedge startup.
+            for spec in &users {
+                match parse_user_spec(spec) {
+                    Ok(user) => {
+                        let user_url = user.url.unwrap_or_else(|| jmap_url.clone());
+                        info!("Provisioning declarative bridge user {}", user.mxid);
+                        if let Err(e) = client_manager
+                            .login(user.mxid.clone(), user.username, user.token, user_url)
+                            .await
+                        {
+                            tracing::error!(
+                                "Failed to provision declarative user {}: {}. Will retry on next start.",
+                                user.mxid,
+                                e
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!("Invalid --user spec '{}': {}", spec, e);
+                    }
+                }
+            }
+
             let state = jmap_matrix_bridge::routes::AppState {
                 client_manager: client_manager.clone(),
                 state_store,
@@ -381,5 +480,50 @@ mod tests {
         assert_eq!(reg.as_token.len(), 64);
         assert_eq!(reg.hs_token.len(), 64);
         assert_ne!(reg.as_token, reg.hs_token);
+    }
+
+    #[test]
+    fn test_parse_user_spec_inline_token() {
+        let u =
+            parse_user_spec("mxid=@you:example.com,username=you,url=https://j/,token=secret")
+                .unwrap();
+        assert_eq!(u.mxid, "@you:example.com");
+        assert_eq!(u.username, "you");
+        assert_eq!(u.url.as_deref(), Some("https://j/"));
+        assert_eq!(u.token, "secret");
+    }
+
+    #[test]
+    fn test_parse_user_spec_url_optional_and_whitespace() {
+        let u = parse_user_spec(" mxid=@a:b , username=alice , token=tok ").unwrap();
+        assert_eq!(u.mxid, "@a:b");
+        assert_eq!(u.username, "alice");
+        assert_eq!(u.url, None);
+        assert_eq!(u.token, "tok");
+    }
+
+    #[test]
+    fn test_parse_user_spec_token_file() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("jmap_test_token_spec");
+        std::fs::write(&path, "  file-token\n").unwrap();
+        let spec = format!(
+            "mxid=@x:y,username=x,token-file={}",
+            path.to_str().unwrap()
+        );
+        let u = parse_user_spec(&spec).unwrap();
+        assert_eq!(u.token, "file-token");
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn test_parse_user_spec_errors() {
+        // Missing required keys.
+        assert!(parse_user_spec("username=x,token=t").is_err()); // no mxid
+        assert!(parse_user_spec("mxid=@x:y,token=t").is_err()); // no username
+        assert!(parse_user_spec("mxid=@x:y,username=x").is_err()); // no token
+        // Unknown key and malformed segment.
+        assert!(parse_user_spec("mxid=@x:y,username=x,token=t,bogus=1").is_err());
+        assert!(parse_user_spec("mxid=@x:y,username,token=t").is_err());
     }
 }

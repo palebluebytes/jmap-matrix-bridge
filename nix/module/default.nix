@@ -7,6 +7,20 @@
 
 let
   cfg = config.services.jmap-bridge;
+
+  # systemd credential name for user N's JMAP token.
+  userCredName = i: "jmap-user-${toString i}";
+
+  # One `--user "…"` argument per declarative user. The token is referenced by
+  # the systemd credential path so it never appears in argv. Double-quoted so
+  # the shell expands $CREDENTIALS_DIRECTORY (a bare `$VAR`, not `${}`, to avoid
+  # Nix interpolation).
+  mkUserArg =
+    i: u:
+    ''--user "mxid=${u.matrixId},username=${u.jmapUsername},url=${
+      if u.jmapUrl != null then u.jmapUrl else cfg.url
+    },token-file=$CREDENTIALS_DIRECTORY/${userCredName i}"'';
+  userArgsStr = lib.concatStringsSep " " (lib.imap0 mkUserArg cfg.users);
 in
 {
   options.services.jmap-bridge = {
@@ -67,6 +81,54 @@ in
       description = "The logging level for the bridge (error, warn, info, debug, trace)";
     };
 
+    users = lib.mkOption {
+      default = [ ];
+      description = ''
+        Bridge users to provision declaratively at startup, instead of the
+        interactive `!login` flow. Each user's JMAP credentials are connected,
+        verified and stored on every start, so this list is the source of truth.
+        Tokens are loaded from files via systemd credentials and never appear in
+        the process arguments.
+      '';
+      example = lib.literalExpression ''
+        [
+          {
+            matrixId = "@you:example.com";
+            jmapUsername = "you@example.com";
+            tokenFile = config.sops.secrets.jmap_token_you.path;
+          }
+        ]
+      '';
+      type = lib.types.listOf (
+        lib.types.submodule {
+          options = {
+            matrixId = lib.mkOption {
+              type = lib.types.str;
+              example = "@you:example.com";
+              description = "Full Matrix user id this JMAP account is bridged to.";
+            };
+            jmapUsername = lib.mkOption {
+              type = lib.types.str;
+              description = "JMAP username (login) for this account.";
+            };
+            jmapUrl = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = "JMAP session URL for this user. Defaults to `services.jmap-bridge.url`.";
+            };
+            tokenFile = lib.mkOption {
+              type = lib.types.str;
+              description = ''
+                Absolute path on the target host to a file containing this user's
+                JMAP token/password (e.g. a sops secret path). Must NOT be a Nix
+                store path, to avoid exposing the secret.
+              '';
+            };
+          };
+        }
+      );
+    };
+
   };
 
   config = lib.mkIf cfg.enable {
@@ -77,7 +139,11 @@ in
           -> (lib.hasPrefix "/" cfg.encryptionKeyFile && !lib.isStorePath (toString cfg.encryptionKeyFile));
         message = "services.jmap-bridge.encryptionKeyFile must be an absolute path on the target host and NOT a Nix store path (to avoid exposing secrets).";
       }
-    ];
+    ]
+    ++ lib.imap0 (i: u: {
+      assertion = lib.hasPrefix "/" u.tokenFile && !lib.isStorePath (toString u.tokenFile);
+      message = "services.jmap-bridge.users.${toString i}.tokenFile (${u.matrixId}) must be an absolute path on the target host and NOT a Nix store path (to avoid exposing secrets).";
+    }) cfg.users;
 
     systemd.services.jmap-bridge = {
       description = "JMAP Matrix Bridge";
@@ -108,6 +174,7 @@ in
                 cfg.encryptionKeyFile != null
               ) "--encryption-key-file \${CREDENTIALS_DIRECTORY}/encryption-key"
             } \
+            ${userArgsStr} \
             ${lib.escapeShellArgs cfg.extraArgs}
         '';
         Restart = "always";
