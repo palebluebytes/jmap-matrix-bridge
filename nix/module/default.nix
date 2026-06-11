@@ -187,9 +187,12 @@ in
 
         # Secrets / Environment
         EnvironmentFile = lib.mkIf (cfg.environmentFile != null) cfg.environmentFile;
-        LoadCredential = lib.optionals (cfg.encryptionKeyFile != null) [
-          "encryption-key:${cfg.encryptionKeyFile}"
-        ];
+        LoadCredential =
+          lib.optionals (cfg.encryptionKeyFile != null) [
+            "encryption-key:${cfg.encryptionKeyFile}"
+          ]
+          # Per-declarative-user JMAP tokens, referenced by token-file in mkUserArg.
+          ++ lib.imap0 (i: u: "${userCredName i}:${u.tokenFile}") cfg.users;
 
         # Systemd Hardening & Sandboxing
         DynamicUser = true;
