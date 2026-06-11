@@ -15,6 +15,8 @@ use jmap_client::blob::upload::UploadResponse;
 use jmap_client::client::Client;
 use jmap_client::core::request::Arguments;
 use jmap_client::email::{EmailBodyPart, EmailBodyValue};
+use jmap_client::mailbox::Role as MailboxRole;
+use jmap_client::mailbox::query::Filter as MailboxFilter;
 
 // ─── Public surface ───────────────────────────────────────────────────────────
 
@@ -295,8 +297,33 @@ struct EmailBuilder<'a> {
 }
 
 impl JmapSender {
+    /// Resolve the id of the mailbox with the given `role` (e.g. Sent/Drafts),
+    /// if the account has one.
+    async fn mailbox_id_for_role(&self, role: MailboxRole) -> Result<Option<String>> {
+        let mut request = self.client.build();
+        request.query_mailbox().filter(MailboxFilter::role(role));
+        let mut response = request
+            .send()
+            .await?
+            .pop_method_response()
+            .context("Empty response for Mailbox/query")?
+            .unwrap_query_mailbox()?;
+        Ok(response.take_ids().into_iter().next())
+    }
+
     /// Build and submit a JMAP batch request, returning the created email's ID.
     async fn submit(&self, params: EmailBuilder<'_>) -> Result<String> {
+        // Every JMAP email must belong to at least one mailbox or the server
+        // rejects the Email/set ("Message has to belong to at least one
+        // mailbox"). File the outgoing copy in Sent, falling back to Drafts.
+        let mailbox_id = match self.mailbox_id_for_role(MailboxRole::Sent).await? {
+            Some(id) => id,
+            None => self
+                .mailbox_id_for_role(MailboxRole::Drafts)
+                .await?
+                .context("Account has neither a Sent nor a Drafts mailbox")?,
+        };
+
         let mut request = self.client.build();
 
         // — Email/set —
@@ -312,6 +339,7 @@ impl JmapSender {
             .email_set_mut();
 
         let email = email_set.create_with_id("draft");
+        email.mailbox_id(&mailbox_id, true);
         email.subject(params.subject);
         email.to(vec![params.to]);
 

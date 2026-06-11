@@ -80,6 +80,30 @@ async fn test_reply_to_email_sets_references() {
         .mount(&mock_server)
         .await;
 
+    // submit() resolves the Sent mailbox before composing; answer that
+    // Mailbox/query (priority 1 so it wins over any catch-all POST mock).
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(|request: &wiremock::Request| {
+            let json: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let method_calls = json.get("methodCalls").unwrap().as_array().unwrap();
+            method_calls
+                .iter()
+                .any(|call| call.as_array().unwrap()[0].as_str().unwrap() == "Mailbox/query")
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Mailbox/query", {
+                "accountId": "acc1",
+                "queryState": "mq1",
+                "position": 0,
+                "ids": ["sent-mailbox-id"]
+            }, "0"]]
+        })))
+        .with_priority(1)
+        .mount(&mock_server)
+        .await;
+
     let client = jmap_client::client::Client::new()
         .credentials(jmap_client::client::Credentials::bearer("dXNlcjpwYXNz"))
         .connect(&format!("{}/.well-known/jmap", mock_server.uri()))
@@ -189,6 +213,30 @@ async fn test_send_email_with_attachments() {
                 }
             }, "1"]]
         })))
+        .mount(&mock_server)
+        .await;
+
+    // submit() resolves the Sent mailbox before composing; answer that
+    // Mailbox/query (priority 1 so it wins over the catch-all EmailSubmission mock).
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(|request: &wiremock::Request| {
+            let json: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let method_calls = json.get("methodCalls").unwrap().as_array().unwrap();
+            method_calls
+                .iter()
+                .any(|call| call.as_array().unwrap()[0].as_str().unwrap() == "Mailbox/query")
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Mailbox/query", {
+                "accountId": "acc1",
+                "queryState": "mq1",
+                "position": 0,
+                "ids": ["sent-mailbox-id"]
+            }, "0"]]
+        })))
+        .with_priority(1)
         .mount(&mock_server)
         .await;
 
