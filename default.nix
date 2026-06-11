@@ -5,6 +5,7 @@
   sqlite,
   openssl,
   cargo-nextest,
+  cacert,
 }:
 
 let
@@ -43,8 +44,21 @@ let
     };
   };
 
-  # Build only the cargo dependencies (fully cached by Nix)
+  # Build only the cargo dependencies (fully cached by Nix). Release profile —
+  # this feeds the production `package` (and thus the VM check).
   cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+
+  # Separate dev-profile dependency build for the test suite. The tests don't
+  # need release optimization (the LLVM opt passes are what make a release build
+  # of the matrix-sdk/sqlx tree so slow), and compiled artifacts are NOT shared
+  # across profiles — so the test build gets its own unoptimized deps cache that
+  # compiles far faster and is reused on every subsequent `nix build …checks`.
+  cargoArtifactsDev = craneLib.buildDepsOnly (
+    commonArgs
+    // {
+      CARGO_PROFILE = "dev";
+    }
+  );
 
   # Build the production package (disable check phase to make installs/deploys instant!)
   package = craneLib.buildPackage (
@@ -55,15 +69,26 @@ let
     }
   );
 
-  # Build and run the test suite separately in the sandbox using cargo-nextest
+  # Build and run the test suite separately in the sandbox using cargo-nextest.
+  # Compiled with the dev profile (off release) for fast feedback — see
+  # cargoArtifactsDev above.
   checks = craneLib.cargoNextest (
     commonArgs
     // {
-      inherit cargoArtifacts;
+      cargoArtifacts = cargoArtifactsDev;
+      CARGO_PROFILE = "dev";
       nativeBuildInputs = commonArgs.nativeBuildInputs ++ [ cargo-nextest ];
 
-      # We skip external network integrations and specify individual exclusions with nextest filter DSL
-      cargoNextestExtraArgs = "--filter 'not (test(test_matrix_login_payload) or test(test_sender_flow) or test(test_multi_user_login_integration) or test(test_poll_hits_jmap_and_matrix_endpoints))'";
+      # The JMAP client (reqwest) eagerly loads system CA roots when it builds,
+      # even for plain-HTTP wiremock targets on 127.0.0.1. The hermetic sandbox
+      # has no trust store, so `ClientBuilder::build()` fails with "No CA
+      # certificates were loaded from the system". Point it at the cacert bundle
+      # so these self-contained tests (full bridge cycle, backfill) can run.
+      SSL_CERT_FILE = "${cacert}/etc/ssl/certs/ca-bundle.crt";
+
+      # We skip external network integrations and specify individual exclusions with the
+      # nextest filterset DSL (-E / --filterset; the old `--filter` flag was removed upstream).
+      cargoNextestExtraArgs = "-E 'not (test(test_matrix_login_payload) or test(test_sender_flow) or test(test_multi_user_login_integration) or test(test_poll_hits_jmap_and_matrix_endpoints))'";
     }
   );
 
