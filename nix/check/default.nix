@@ -2,11 +2,36 @@
   self,
   pkgs,
   inputs,
+  # Which Matrix homeserver to run the round-trip against: "dendrite" (proven)
+  # or "tuwunel" (conduwuit-lineage, Conduit-class RAM, declarative appservices
+  # via appservice_dir). The bridge + Stalwart + assertions are identical; only
+  # the homeserver service and how it loads the appservice registration differ.
+  homeserver ? "dendrite",
   ...
 }:
 
+let
+  isTuwunel = homeserver == "tuwunel";
+  hsUnit = if isTuwunel then "tuwunel" else "dendrite";
+  hsPort = 8008;
+
+  # Appservice registration, shared verbatim by both homeservers.
+  registrationYaml = ''
+    id: jmap-bridge
+    url: http://127.0.0.1:9999
+    as_token: secret_as_token
+    hs_token: secret_hs_token
+    sender_localpart: _jmap_bot
+    namespaces:
+      users:
+      - exclusive: true
+        regex: '@_jmap_.*'
+      aliases: []
+      rooms: []
+  '';
+in
 pkgs.testers.nixosTest {
-  name = "jmap-bridge-test";
+  name = "jmap-bridge-${homeserver}-test";
 
   nodes.machine =
     {
@@ -14,271 +39,281 @@ pkgs.testers.nixosTest {
       pkgs,
       ...
     }:
+    let
+      # Homeserver-specific config. Both listen on hsPort and load the SAME
+      # registration; dendrite needs a generated signing key, tuwunel reads the
+      # registration from a directory (appservice_dir).
+      hsConfig =
+        if isTuwunel then
+          {
+            services.matrix-tuwunel = {
+              enable = true;
+              settings.global = {
+                server_name = "localhost";
+                address = [ "127.0.0.1" ];
+                port = [ hsPort ];
+                appservice_dir = "/etc/tuwunel/appservices/";
+                allow_federation = false;
+                allow_registration = false;
+              };
+            };
+            environment.etc."tuwunel/appservices/jmap-registration.yaml".text = registrationYaml;
+          }
+        else
+          {
+            services.dendrite = {
+              enable = true;
+              httpPort = hsPort;
+              settings = {
+                global = {
+                  server_name = "localhost";
+                  private_key = "/var/lib/dendrite/matrix_key.pem";
+                };
+                client_api.registration_disabled = true;
+                app_service_api.config_files = [ "/etc/dendrite/jmap-registration.yaml" ];
+              };
+            };
+            environment.etc."dendrite/jmap-registration.yaml".text = registrationYaml;
+            system.activationScripts.create-dendrite-key = ''
+              mkdir -p /var/lib/dendrite
+              if [ ! -f /var/lib/dendrite/matrix_key.pem ]; then
+                ${pkgs.dendrite}/bin/generate-keys --private-key /var/lib/dendrite/matrix_key.pem
+              fi
+              chown dendrite:dendrite /var/lib/dendrite/matrix_key.pem
+            '';
+          };
+    in
     {
       imports = [
         inputs.sops-nix.nixosModules.sops
         ../../../modules/nixos/services/jmap-bridge/default.nix
       ];
 
-      config = {
-        # Satisfy sops assertion
-        sops.age.keyFile = "/etc/dummy-sops-key";
-        sops.validateSopsFiles = false;
+      config = lib.mkMerge [
+        hsConfig
+        {
+          # Satisfy sops assertion
+          sops.age.keyFile = "/etc/dummy-sops-key";
+          sops.validateSopsFiles = false;
 
-        system.activationScripts.create-dummy-sops-key = ''
-          mkdir -p /etc
-          echo "AGE-SECRET-KEY-1H6VNY7V4QW7Z8E4G9Q8Z5Z5Z5Z5Z5Z5Z5Z5Z5Z5Z5Z5Z5Z5Z5Z5SXXXXX" > /etc/dummy-sops-key
-        '';
-
-        system.activationScripts.create-jmap-bridge-key = ''
-          mkdir -p /etc
-          echo -n "MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI=" > /etc/jmap-bridge-key
-        '';
-
-        # Enable Dendrite
-        services.dendrite = {
-          enable = true;
-          settings = {
-            global = {
-              server_name = "localhost";
-              private_key = "/var/lib/dendrite/matrix_key.pem";
-            };
-            client_api.registration_disabled = true;
-            app_service_api.config_files = [ "/etc/dendrite/jmap-registration.yaml" ];
-          };
-        };
-
-        # Provide registration file for Application Service
-        environment.etc."dendrite/jmap-registration.yaml".text = ''
-          id: jmap-bridge
-          url: http://127.0.0.1:9999
-          as_token: secret_as_token
-          hs_token: secret_hs_token
-          sender_localpart: _jmap_bot
-          namespaces:
-            users:
-            - exclusive: true
-              regex: '@_jmap_.*'
-            aliases: []
-            rooms: []
-        '';
-
-        # Enable Bridge
-        services.jmap-bridge = {
-          enable = true;
-          url = "http://localhost:8080";
-          matrixUrl = "http://127.0.0.1:8008"; # Dendrite
-          encryptionKeyFile = "/etc/jmap-bridge-key";
-          extraArgs = [
-            "--jmap-username"
-            "bridgeuser"
-          ];
-          environmentFile = pkgs.writeText "jmap-bridge-env" ''
-            MATRIX_AS_TOKEN=secret_as_token
-            MATRIX_HS_TOKEN=secret_hs_token
-            JMAP_TOKEN=bridgepass
-            RUST_LOG=info
+          system.activationScripts.create-dummy-sops-key = ''
+            mkdir -p /etc
+            echo "AGE-SECRET-KEY-1H6VNY7V4QW7Z8E4G9Q8Z5Z5Z5Z5Z5Z5Z5Z5Z5Z5Z5Z5Z5Z5Z5Z5SXXXXX" > /etc/dummy-sops-key
           '';
-        };
 
-        # Tools used by the round-trip test assertions.
-        environment.systemPackages = [
-          pkgs.sqlite
-          pkgs.jq
-        ];
+          system.activationScripts.create-jmap-bridge-key = ''
+            mkdir -p /etc
+            echo -n "MTIzNDU2Nzg5MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTI=" > /etc/jmap-bridge-key
+          '';
 
-        # Do not auto-start the bridge at boot: the testScript creates the
-        # Stalwart account first, then starts the bridge so its one-shot
-        # auto-login (main.rs) succeeds against a real mailbox.
-        systemd.services.jmap-bridge.wantedBy = lib.mkForce [ ];
+          # Enable Bridge
+          services.jmap-bridge = {
+            enable = true;
+            url = "http://localhost:8080";
+            matrixUrl = "http://127.0.0.1:${toString hsPort}";
+            encryptionKeyFile = "/etc/jmap-bridge-key";
+            extraArgs = [
+              "--jmap-username"
+              "bridgeuser"
+            ];
+            environmentFile = pkgs.writeText "jmap-bridge-env" ''
+              MATRIX_AS_TOKEN=secret_as_token
+              MATRIX_HS_TOKEN=secret_hs_token
+              JMAP_TOKEN=bridgepass
+              RUST_LOG=info
+            '';
+          };
 
-        # Stalwart Mail Server
-        services.stalwart = {
-          enable = true;
-          stateVersion = "23.11"; # Or inherit (config.system) stateVersion;
-          settings = {
-            server.hostname = "localhost";
-            server.listener = {
-              "jmap" = {
-                bind = [ "[::]:8081" ];
-                protocol = "http";
+          # Tools used by the round-trip test assertions.
+          environment.systemPackages = [
+            pkgs.sqlite
+            pkgs.jq
+          ];
+
+          # Do not auto-start the bridge at boot: the testScript creates the
+          # Stalwart account first, then starts the bridge so its one-shot
+          # auto-login (main.rs) succeeds against a real mailbox.
+          systemd.services.jmap-bridge.wantedBy = lib.mkForce [ ];
+
+          # Stalwart Mail Server
+          services.stalwart = {
+            enable = true;
+            stateVersion = "23.11"; # Or inherit (config.system) stateVersion;
+            settings = {
+              server.hostname = "localhost";
+              server.listener = {
+                "jmap" = {
+                  bind = [ "[::]:8081" ];
+                  protocol = "http";
+                };
+                # Management/admin API used at test runtime to create a real
+                # mail account (the fallback-admin has no JMAP mailbox).
+                "management" = {
+                  bind = [ "127.0.0.1:8082" ];
+                  protocol = "http";
+                };
               };
-              # Management/admin API used at test runtime to create a real
-              # mail account (the fallback-admin has no JMAP mailbox).
-              "management" = {
-                bind = [ "127.0.0.1:8082" ];
-                protocol = "http";
+
+              authentication.fallback-admin = {
+                user = "admin";
+                secret = "admin_password";
               };
-            };
 
-            authentication.fallback-admin = {
-              user = "admin";
-              secret = "admin_password";
-            };
+              authentication.mechanisms = [ "plain" ];
+              authentication.directory = "internal";
 
-            authentication.mechanisms = [ "plain" ];
-            authentication.directory = "internal";
+              # Mirror the production mail profile's storage wiring so the
+              # internal directory can actually hold accounts + mailboxes.
+              storage = {
+                directory = "internal";
+                data = "db";
+                blob = "db";
+                lookup = "db";
+                fts = "db";
+              };
 
-            # Mirror the production mail profile's storage wiring so the
-            # internal directory can actually hold accounts + mailboxes.
-            storage = {
-              directory = "internal";
-              data = "db";
-              blob = "db";
-              lookup = "db";
-              fts = "db";
-            };
-
-            directory."internal" = {
-              store = "db";
-              type = "internal";
+              directory."internal" = {
+                store = "db";
+                type = "internal";
+              };
             };
           };
-        };
 
-        # Proxy to fix JMAP redirect
-        systemd.services.jmap-proxy = {
-          description = "JMAP Proxy to fix redirect";
-          wantedBy = [ "multi-user.target" ];
-          serviceConfig = {
-            ExecStart = "${pkgs.python3}/bin/python3 ${pkgs.writeText "jmap-proxy.py" ''
-              import http.server
-              import urllib.request
-              import urllib.error
+          # Proxy to fix JMAP redirect
+          systemd.services.jmap-proxy = {
+            description = "JMAP Proxy to fix redirect";
+            wantedBy = [ "multi-user.target" ];
+            serviceConfig = {
+              ExecStart = "${pkgs.python3}/bin/python3 ${pkgs.writeText "jmap-proxy.py" ''
+                import http.server
+                import urllib.request
+                import urllib.error
 
-              class H(http.server.BaseHTTPRequestHandler):
-                  def do_GET(self):
-                      print(f"PROXY GET: {self.path}", flush=True)
-                      print(f"HEADERS: {self.headers}", flush=True)
-                      url = "http://127.0.0.1:8081" + self.path
-                      if self.path == "/.well-known/jmap":
-                          url = "http://127.0.0.1:8081/jmap/session"
-                          
-                      req = urllib.request.Request(url)
-                      for k, v in self.headers.items():
-                          if k.lower() not in ["host", "connection"]:
-                              # Forward the Authorization header on discovery too:
-                              # Stalwart's /jmap/session returns the *authenticated*
-                              # principal's accounts (accountId). Stripping auth here
-                              # yields an anonymous session with the wrong account, so
-                              # the bridge's later Mailbox/query hits another account
-                              # and Stalwart returns 403 Forbidden.
-                              req.add_header(k, v)
-                          
-                      try:
-                          with urllib.request.urlopen(req) as response:
-                              self.send_response(response.status)
-                              for k, v in response.headers.items():
-                                  if k.lower() not in ["transfer-encoding", "connection", "content-length"]:
-                                      self.send_header(k, v)
-                              
-                              body = response.read()
-                              if self.path == "/.well-known/jmap":
-                                  import json
-                                  try:
-                                      data = json.loads(body.decode())
-                                      # Rewrite URLs to point to the proxy
-                                      if "apiUrl" in data:
-                                          data["apiUrl"] = data["apiUrl"].replace("127.0.0.1:8081", "127.0.0.1:8080").replace("localhost:8081", "localhost:8080")
-                                          # Stalwart advertises apiUrl with a trailing slash (".../jmap/").
-                                          # A POST there authenticates but returns 403 Forbidden, whereas
-                                          # the bare ".../jmap" works. Normalise so the bridge's JMAP calls
-                                          # hit the working endpoint.
-                                          if data["apiUrl"].endswith("/jmap/"):
-                                              data["apiUrl"] = data["apiUrl"][:-1]
-                                      if "downloadUrl" in data:
-                                          data["downloadUrl"] = data["downloadUrl"].replace("127.0.0.1:8081", "127.0.0.1:8080").replace("localhost:8081", "localhost:8080")
-                                      if "uploadUrl" in data:
-                                          data["uploadUrl"] = data["uploadUrl"].replace("127.0.0.1:8081", "127.0.0.1:8080").replace("localhost:8081", "localhost:8080")
-                                      print(f"DISCOVERY session primaryAccounts={data.get('primaryAccounts')} apiUrl={data.get('apiUrl')}", flush=True)
-                                      body = json.dumps(data).encode()
-                                  except Exception as e:
-                                      print(f"Failed to parse session JSON: {e}", flush=True)
-                              
-                              self.send_header("Content-Length", str(len(body)))
-                              self.end_headers()
-                              self.wfile.write(body)
-                      except urllib.error.HTTPError as e:
-                          self.send_response(e.code)
-                          for k, v in e.headers.items():
-                              if k.lower() not in ["transfer-encoding", "connection"]:
-                                  self.send_header(k, v)
-                          self.end_headers()
-                          self.wfile.write(e.read())
-                      except Exception as e:
-                          self.send_response(500)
-                          self.end_headers()
-                          self.wfile.write(str(e).encode())
+                class H(http.server.BaseHTTPRequestHandler):
+                    def do_GET(self):
+                        print(f"PROXY GET: {self.path}", flush=True)
+                        print(f"HEADERS: {self.headers}", flush=True)
+                        url = "http://127.0.0.1:8081" + self.path
+                        if self.path == "/.well-known/jmap":
+                            url = "http://127.0.0.1:8081/jmap/session"
+                            
+                        req = urllib.request.Request(url)
+                        for k, v in self.headers.items():
+                            if k.lower() not in ["host", "connection"]:
+                                # Forward the Authorization header on discovery too:
+                                # Stalwart's /jmap/session returns the *authenticated*
+                                # principal's accounts (accountId). Stripping auth here
+                                # yields an anonymous session with the wrong account, so
+                                # the bridge's later Mailbox/query hits another account
+                                # and Stalwart returns 403 Forbidden.
+                                req.add_header(k, v)
+                            
+                        try:
+                            with urllib.request.urlopen(req) as response:
+                                self.send_response(response.status)
+                                for k, v in response.headers.items():
+                                    if k.lower() not in ["transfer-encoding", "connection", "content-length"]:
+                                        self.send_header(k, v)
+                                
+                                body = response.read()
+                                if self.path == "/.well-known/jmap":
+                                    import json
+                                    try:
+                                        data = json.loads(body.decode())
+                                        # Rewrite URLs to point to the proxy
+                                        if "apiUrl" in data:
+                                            data["apiUrl"] = data["apiUrl"].replace("127.0.0.1:8081", "127.0.0.1:8080").replace("localhost:8081", "localhost:8080")
+                                            # Stalwart advertises apiUrl with a trailing slash (".../jmap/").
+                                            # A POST there authenticates but returns 403 Forbidden, whereas
+                                            # the bare ".../jmap" works. Normalise so the bridge's JMAP calls
+                                            # hit the working endpoint.
+                                            if data["apiUrl"].endswith("/jmap/"):
+                                                data["apiUrl"] = data["apiUrl"][:-1]
+                                        if "downloadUrl" in data:
+                                            data["downloadUrl"] = data["downloadUrl"].replace("127.0.0.1:8081", "127.0.0.1:8080").replace("localhost:8081", "localhost:8080")
+                                        if "uploadUrl" in data:
+                                            data["uploadUrl"] = data["uploadUrl"].replace("127.0.0.1:8081", "127.0.0.1:8080").replace("localhost:8081", "localhost:8080")
+                                        print(f"DISCOVERY session primaryAccounts={data.get('primaryAccounts')} apiUrl={data.get('apiUrl')}", flush=True)
+                                        body = json.dumps(data).encode()
+                                    except Exception as e:
+                                        print(f"Failed to parse session JSON: {e}", flush=True)
+                                
+                                self.send_header("Content-Length", str(len(body)))
+                                self.end_headers()
+                                self.wfile.write(body)
+                        except urllib.error.HTTPError as e:
+                            self.send_response(e.code)
+                            for k, v in e.headers.items():
+                                if k.lower() not in ["transfer-encoding", "connection"]:
+                                    self.send_header(k, v)
+                            self.end_headers()
+                            self.wfile.write(e.read())
+                        except Exception as e:
+                            self.send_response(500)
+                            self.end_headers()
+                            self.wfile.write(str(e).encode())
 
-                  def do_POST(self):
-                      print(f"PROXY POST: {self.path}", flush=True)
-                      print(f"HEADERS: {self.headers}", flush=True)
-                      url = "http://127.0.0.1:8081" + self.path
-                      content_length = int(self.headers.get('Content-Length', 0))
-                      post_data = self.rfile.read(content_length)
-                      
-                      req = urllib.request.Request(url, data=post_data, method="POST")
-                      for k, v in self.headers.items():
-                          if k.lower() not in ["host", "connection"]:
-                              req.add_header(k, v)
-                          
-                      try:
-                          with urllib.request.urlopen(req) as response:
-                              self.send_response(response.status)
-                              for k, v in response.headers.items():
-                                  if k.lower() not in ["transfer-encoding", "connection"]:
-                                      self.send_header(k, v)
-                              self.end_headers()
-                              self.wfile.write(response.read())
-                      except urllib.error.HTTPError as e:
-                          self.send_response(e.code)
-                          for k, v in e.headers.items():
-                              if k.lower() not in ["transfer-encoding", "connection"]:
-                                  self.send_header(k, v)
-                          self.end_headers()
-                          self.wfile.write(e.read())
-                      except Exception as e:
-                          self.send_response(500)
-                          self.end_headers()
-                          self.wfile.write(str(e).encode())
+                    def do_POST(self):
+                        print(f"PROXY POST: {self.path}", flush=True)
+                        print(f"HEADERS: {self.headers}", flush=True)
+                        url = "http://127.0.0.1:8081" + self.path
+                        content_length = int(self.headers.get('Content-Length', 0))
+                        post_data = self.rfile.read(content_length)
+                        
+                        req = urllib.request.Request(url, data=post_data, method="POST")
+                        for k, v in self.headers.items():
+                            if k.lower() not in ["host", "connection"]:
+                                req.add_header(k, v)
+                            
+                        try:
+                            with urllib.request.urlopen(req) as response:
+                                self.send_response(response.status)
+                                for k, v in response.headers.items():
+                                    if k.lower() not in ["transfer-encoding", "connection"]:
+                                        self.send_header(k, v)
+                                self.end_headers()
+                                self.wfile.write(response.read())
+                        except urllib.error.HTTPError as e:
+                            self.send_response(e.code)
+                            for k, v in e.headers.items():
+                                if k.lower() not in ["transfer-encoding", "connection"]:
+                                    self.send_header(k, v)
+                            self.end_headers()
+                            self.wfile.write(e.read())
+                        except Exception as e:
+                            self.send_response(500)
+                            self.end_headers()
+                            self.wfile.write(str(e).encode())
 
-              http.server.HTTPServer(("127.0.0.1", 8080), H).serve_forever()
-            ''}";
-            Restart = "always";
+                http.server.HTTPServer(("127.0.0.1", 8080), H).serve_forever()
+              ''}";
+              Restart = "always";
+            };
           };
-        };
 
-        # Provide the package via overlay
-        nixpkgs.overlays = [
-          (_final: prev: {
-            jmap-matrix-bridge = self.packages.${prev.system}.jmap-matrix-bridge;
-          })
-        ];
+          # Provide the package via overlay
+          nixpkgs.overlays = [
+            (_final: prev: {
+              jmap-matrix-bridge = self.packages.${prev.system}.jmap-matrix-bridge;
+            })
+          ];
 
-        # Create dummy key for Dendrite
-        system.activationScripts.create-dendrite-key = ''
-          mkdir -p /var/lib/dendrite
-          if [ ! -f /var/lib/dendrite/matrix_key.pem ]; then
-            ${pkgs.dendrite}/bin/generate-keys --private-key /var/lib/dendrite/matrix_key.pem
-          fi
-          chown dendrite:dendrite /var/lib/dendrite/matrix_key.pem
-        '';
-
-        # Disable nix-command/flakes in the VM to speed up
-        nix.settings.experimental-features = lib.mkForce [ ];
-      };
+          # Disable nix-command/flakes in the VM to speed up
+          nix.settings.experimental-features = lib.mkForce [ ];
+        }
+      ];
     };
 
   testScript = ''
     machine.start()
 
-    # Wait for Dendrite
-    machine.wait_for_unit("dendrite.service")
-    machine.wait_for_open_port(8008)
-    machine.wait_until_succeeds("curl -s http://127.0.0.1:8008/_matrix/client/versions")
+    # Wait for the Matrix homeserver (dendrite or tuwunel)
+    machine.wait_for_unit("${hsUnit}.service")
+    machine.wait_for_open_port(${toString hsPort})
+    machine.wait_until_succeeds("curl -s http://127.0.0.1:${toString hsPort}/_matrix/client/versions")
 
-    print("=== DENDRITE LOGS ===")
-    print(machine.execute("journalctl -u dendrite")[1])
+    print("=== ${hsUnit} LOGS ===")
+    print(machine.execute("journalctl -u ${hsUnit}")[1])
     print("=====================")
     # Wait for Stalwart and Proxy
     try:
