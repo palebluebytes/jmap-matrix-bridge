@@ -465,13 +465,16 @@ impl MatrixClient {
         &self,
         name: &str,
         topic: &str,
-        invite_user_id: &str,
+        invite_user_ids: &[&str],
     ) -> Result<String> {
         let mut request = CreateRoomRequest::new();
         request.name = Some(name.to_owned());
         request.topic = Some(topic.to_owned());
         request.preset = Some(RoomPreset::PrivateChat);
-        request.invite = vec![UserId::parse(invite_user_id)?];
+        request.invite = invite_user_ids
+            .iter()
+            .map(|u| UserId::parse(u))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         request.is_direct = true;
 
         let guest_access_event = matrix_sdk::ruma::serde::Raw::from_json_string(
@@ -500,7 +503,7 @@ impl MatrixClient {
         self.create_dm_room(
             thread_subject,
             &format!("Email Thread: {thread_subject}"),
-            inviter_user_id,
+            &[inviter_user_id],
         )
         .await
     }
@@ -512,10 +515,16 @@ impl MatrixClient {
         matrix_user_id: &str,
     ) -> Result<String> {
         info!("Creating room for contact: {contact_name}");
+        // The room is invite-only (PrivateChat). Invite BOTH the real user and the
+        // contact's ghost as part of the create itself (fully committed before this
+        // returns), so the ghost's subsequent join is permitted — otherwise the
+        // homeserver rejects it with "join rule invite forbids it".
+        let ghost_localpart = crate::ghost::email_to_localpart(contact_email);
+        let ghost_user_id = format!("@{ghost_localpart}:{}", self.domain);
         self.create_dm_room(
             contact_name,
             &format!("Conversation with {contact_email}"),
-            matrix_user_id,
+            &[matrix_user_id, &ghost_user_id],
         )
         .await
     }
@@ -587,7 +596,7 @@ impl MatrixClient {
             .create_dm_room(
                 "JMAP Bridge Bot",
                 "Authentication Notification",
-                matrix_user_id,
+                &[matrix_user_id],
             )
             .await?;
         self.send_message(&room_id, message, None, None).await?;
