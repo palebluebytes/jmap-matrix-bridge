@@ -259,7 +259,10 @@ async fn run_event_loop(client: Arc<Client>, poller: JmapPoller, user_id: String
             tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
             if let Err(e) = poller_clone.poll().await {
-                tracing::error!("Sync error for user {}: {}", uid_clone, e);
+                // `{:#}` prints the full anyhow context chain (e.g. the
+                // underlying JMAP method error), not just the outermost
+                // "Mailbox sync failed" wrapper.
+                tracing::error!("Sync error for user {}: {:#}", uid_clone, e);
             }
         }
     }));
