@@ -109,7 +109,10 @@ pkgs.testers.nixosTest {
           # Enable Bridge
           services.jmap-bridge = {
             enable = true;
-            url = "http://localhost:8080";
+            # Talk to Stalwart directly. The bridge must follow Stalwart's
+            # /.well-known/jmap -> /jmap/session redirect itself (no discovery
+            # proxy), so this exercises the real session-discovery path.
+            url = "http://localhost:8081";
             matrixUrl = "http://127.0.0.1:${toString hsPort}";
             encryptionKeyFile = "/etc/jmap-bridge-key";
             extraArgs = [
@@ -179,118 +182,6 @@ pkgs.testers.nixosTest {
             };
           };
 
-          # Proxy to fix JMAP redirect
-          systemd.services.jmap-proxy = {
-            description = "JMAP Proxy to fix redirect";
-            wantedBy = [ "multi-user.target" ];
-            serviceConfig = {
-              ExecStart = "${pkgs.python3}/bin/python3 ${pkgs.writeText "jmap-proxy.py" ''
-                import http.server
-                import urllib.request
-                import urllib.error
-
-                class H(http.server.BaseHTTPRequestHandler):
-                    def do_GET(self):
-                        print(f"PROXY GET: {self.path}", flush=True)
-                        print(f"HEADERS: {self.headers}", flush=True)
-                        url = "http://127.0.0.1:8081" + self.path
-                        if self.path == "/.well-known/jmap":
-                            url = "http://127.0.0.1:8081/jmap/session"
-                            
-                        req = urllib.request.Request(url)
-                        for k, v in self.headers.items():
-                            if k.lower() not in ["host", "connection"]:
-                                # Forward the Authorization header on discovery too:
-                                # Stalwart's /jmap/session returns the *authenticated*
-                                # principal's accounts (accountId). Stripping auth here
-                                # yields an anonymous session with the wrong account, so
-                                # the bridge's later Mailbox/query hits another account
-                                # and Stalwart returns 403 Forbidden.
-                                req.add_header(k, v)
-                            
-                        try:
-                            with urllib.request.urlopen(req) as response:
-                                self.send_response(response.status)
-                                for k, v in response.headers.items():
-                                    if k.lower() not in ["transfer-encoding", "connection", "content-length"]:
-                                        self.send_header(k, v)
-                                
-                                body = response.read()
-                                if self.path == "/.well-known/jmap":
-                                    import json
-                                    try:
-                                        data = json.loads(body.decode())
-                                        # Rewrite URLs to point to the proxy
-                                        if "apiUrl" in data:
-                                            data["apiUrl"] = data["apiUrl"].replace("127.0.0.1:8081", "127.0.0.1:8080").replace("localhost:8081", "localhost:8080")
-                                            # Stalwart advertises apiUrl with a trailing slash (".../jmap/").
-                                            # A POST there authenticates but returns 403 Forbidden, whereas
-                                            # the bare ".../jmap" works. Normalise so the bridge's JMAP calls
-                                            # hit the working endpoint.
-                                            if data["apiUrl"].endswith("/jmap/"):
-                                                data["apiUrl"] = data["apiUrl"][:-1]
-                                        if "downloadUrl" in data:
-                                            data["downloadUrl"] = data["downloadUrl"].replace("127.0.0.1:8081", "127.0.0.1:8080").replace("localhost:8081", "localhost:8080")
-                                        if "uploadUrl" in data:
-                                            data["uploadUrl"] = data["uploadUrl"].replace("127.0.0.1:8081", "127.0.0.1:8080").replace("localhost:8081", "localhost:8080")
-                                        print(f"DISCOVERY session primaryAccounts={data.get('primaryAccounts')} apiUrl={data.get('apiUrl')}", flush=True)
-                                        body = json.dumps(data).encode()
-                                    except Exception as e:
-                                        print(f"Failed to parse session JSON: {e}", flush=True)
-                                
-                                self.send_header("Content-Length", str(len(body)))
-                                self.end_headers()
-                                self.wfile.write(body)
-                        except urllib.error.HTTPError as e:
-                            self.send_response(e.code)
-                            for k, v in e.headers.items():
-                                if k.lower() not in ["transfer-encoding", "connection"]:
-                                    self.send_header(k, v)
-                            self.end_headers()
-                            self.wfile.write(e.read())
-                        except Exception as e:
-                            self.send_response(500)
-                            self.end_headers()
-                            self.wfile.write(str(e).encode())
-
-                    def do_POST(self):
-                        print(f"PROXY POST: {self.path}", flush=True)
-                        print(f"HEADERS: {self.headers}", flush=True)
-                        url = "http://127.0.0.1:8081" + self.path
-                        content_length = int(self.headers.get('Content-Length', 0))
-                        post_data = self.rfile.read(content_length)
-                        
-                        req = urllib.request.Request(url, data=post_data, method="POST")
-                        for k, v in self.headers.items():
-                            if k.lower() not in ["host", "connection"]:
-                                req.add_header(k, v)
-                            
-                        try:
-                            with urllib.request.urlopen(req) as response:
-                                self.send_response(response.status)
-                                for k, v in response.headers.items():
-                                    if k.lower() not in ["transfer-encoding", "connection"]:
-                                        self.send_header(k, v)
-                                self.end_headers()
-                                self.wfile.write(response.read())
-                        except urllib.error.HTTPError as e:
-                            self.send_response(e.code)
-                            for k, v in e.headers.items():
-                                if k.lower() not in ["transfer-encoding", "connection"]:
-                                    self.send_header(k, v)
-                            self.end_headers()
-                            self.wfile.write(e.read())
-                        except Exception as e:
-                            self.send_response(500)
-                            self.end_headers()
-                            self.wfile.write(str(e).encode())
-
-                http.server.HTTPServer(("127.0.0.1", 8080), H).serve_forever()
-              ''}";
-              Restart = "always";
-            };
-          };
-
           # Provide the package via overlay
           nixpkgs.overlays = [
             (_final: prev: {
@@ -315,24 +206,19 @@ pkgs.testers.nixosTest {
     print("=== ${hsUnit} LOGS ===")
     print(machine.execute("journalctl -u ${hsUnit}")[1])
     print("=====================")
-    # Wait for Stalwart and Proxy
+    # Wait for Stalwart
     try:
         machine.wait_for_unit("stalwart.service")
         machine.wait_for_open_port(8081, timeout=20)
-        machine.wait_for_unit("jmap-proxy.service")
-        machine.wait_for_open_port(8080, timeout=10)
     finally:
         print("=== STALWART LOGS ===")
         print(machine.execute("journalctl -u stalwart")[1])
         print("======================")
-        print("=== PROXY LOGS ===")
-        print(machine.execute("journalctl -u jmap-proxy")[1])
-        print("===================")
 
     import json
     import urllib.parse
 
-    JMAP = "http://127.0.0.1:8081"   # talk to Stalwart JMAP directly (bypass the bridge's proxy)
+    JMAP = "http://127.0.0.1:8081"   # talk to Stalwart JMAP directly
     MGMT = "http://127.0.0.1:8082"   # Stalwart management/admin API
     AUTH = "-u bridgeuser:bridgepass"
     ADMIN = "-u admin:admin_password"
@@ -367,8 +253,9 @@ pkgs.testers.nixosTest {
     print(machine.execute("curl -sS " + ADMIN + " " + MGMT + "/api/principal/bridgeuser")[1])
 
     # Gate: the JMAP account must resolve with an Inbox before starting the bridge.
-    # Stalwart serves the session at /jmap/session (its /.well-known/jmap is a
-    # redirect -- that's what the bundled proxy rewrites).
+    # Stalwart serves the session at /jmap/session; /.well-known/jmap 307-redirects
+    # there, and the bridge must follow that redirect itself (jmap-client trusts the
+    # connect host via follow_redirects()).
     print("=== raw JMAP session for bridgeuser ===")
     print(machine.execute("curl -sS -i " + AUTH + " " + JMAP + "/jmap/session")[1])
     account_id = machine.wait_until_succeeds(
