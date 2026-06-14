@@ -12,14 +12,15 @@ let
   userCredName = i: "jmap-user-${toString i}";
 
   # One `--user "…"` argument per declarative user. The token is referenced by
-  # the systemd credential path so it never appears in argv. Double-quoted so
-  # the shell expands $CREDENTIALS_DIRECTORY (a bare `$VAR`, not `${}`, to avoid
-  # Nix interpolation).
+  # the systemd credential path so it never appears in argv. systemd only
+  # substitutes the `${VAR}` form mid-word (a bare `$VAR` is expanded only as a
+  # standalone word), so we emit `${CREDENTIALS_DIRECTORY}` — escaped as `''${`
+  # to stop Nix from interpolating it.
   mkUserArg =
     i: u:
     ''--user "mxid=${u.matrixId},username=${u.jmapUsername},url=${
       if u.jmapUrl != null then u.jmapUrl else cfg.url
-    },token-file=$CREDENTIALS_DIRECTORY/${userCredName i}"'';
+    },token-file=''${CREDENTIALS_DIRECTORY}/${userCredName i}"'';
   userArgsStr = lib.concatStringsSep " " (lib.imap0 mkUserArg cfg.users);
 in
 {
