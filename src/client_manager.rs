@@ -213,8 +213,21 @@ impl ClientManager {
     }
 
     async fn connect_jmap(&self, username: &str, token: &str, url: &str) -> Result<Client> {
-        Client::new()
-            .credentials((username.to_owned(), token.to_owned()))
+        // jmap-client refuses to follow any redirect during session discovery
+        // unless the destination host is in its trusted-hosts list (default:
+        // empty). Stalwart's `/.well-known/jmap` always 307-redirects to
+        // `/jmap/session`, so without trusting the connect host, discovery
+        // aborts with "Aborting redirect request to unknown host". The redirect
+        // is same-host, so trusting the URL's host is sufficient.
+        let mut builder =
+            Client::new().credentials((username.to_owned(), token.to_owned()));
+        if let Some(host) = reqwest::Url::parse(url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_owned))
+        {
+            builder = builder.follow_redirects([host]);
+        }
+        builder
             .connect(url)
             .await
             .map_err(|e| anyhow!("Failed to connect to JMAP: {e}"))
