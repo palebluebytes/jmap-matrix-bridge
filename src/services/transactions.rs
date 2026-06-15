@@ -87,6 +87,15 @@ pub async fn process_transaction(
                 }
             }
             AnyTimelineEvent::MessageLike(e) => {
+                // Ignore messages the bridge itself authored: the bot and every
+                // `@_jmap_*` ghost live in the appservice's exclusive namespace
+                // and their events are echoed straight back to us. Treating a
+                // ghost's bridged email as an outbound user message replies
+                // "You are not logged in" to every email, and the bot-sent reply
+                // is itself echoed back, so it loops and floods the room.
+                if sender_id.starts_with("@_jmap_") {
+                    continue;
+                }
                 if let matrix_sdk::ruma::events::AnyMessageLikeEvent::RoomMessage(message_event) = e
                     && let Some(content) = message_event.as_original().map(|ev| &ev.content)
                 {

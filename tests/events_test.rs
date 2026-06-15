@@ -89,6 +89,96 @@ async fn test_help_command() {
 }
 
 #[tokio::test]
+async fn test_ghost_authored_message_is_ignored() {
+    // A ghost's bridged email is echoed back to the appservice as a transaction.
+    // The bridge must NOT treat it as an outbound user message — doing so finds
+    // no JMAP session for the ghost and replies "You are not logged in", which
+    // (sent by the bot) is itself echoed back and loops, flooding the room.
+    let mock_server = MockServer::start().await;
+
+    // Any reply the bridge sends goes to this endpoint. We expect ZERO calls.
+    Mock::given(method("PUT"))
+        .and(path_regex(
+            r"^/_matrix/client/v3/rooms/.*/send/m.room.message/.*",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "event_id": "$should_not_happen"
+        })))
+        .expect(0)
+        .mount(&mock_server)
+        .await;
+
+    let store = Store::new_in_memory(None).await.unwrap();
+    // Register the owning user (FK requirement for the room mapping).
+    store
+        .save_user(&jmap_matrix_bridge::store::RegisteredUser {
+            matrix_user_id: "@inkpotmonkey:localhost".to_string(),
+            jmap_username: "thomas".to_string(),
+            jmap_token: "secret".to_string(),
+            jmap_url: mock_server.uri(),
+        })
+        .await
+        .unwrap();
+    // Make the room a ghost room so the buggy path WOULD route the message to
+    // outbound handling (and thus emit the "not logged in" reply).
+    store
+        .save_room_ghost_mapping(
+            "!room:localhost",
+            "anthropic@anthropic.com",
+            "@inkpotmonkey:localhost",
+        )
+        .await
+        .unwrap();
+
+    let matrix = MatrixClient::new(&mock_server.uri(), "token", "localhost")
+        .await
+        .unwrap();
+    let client_manager = Arc::new(ClientManager::new(store, matrix, 10));
+    let state_store = Arc::new(StateStore::new());
+    let state = AppState {
+        client_manager,
+        state_store,
+        hs_token: "hs_token".to_string(),
+    };
+
+    let app = Router::new()
+        .route(
+            "/_matrix/app/v1/transactions/{txn_id}",
+            put(handle_transactions),
+        )
+        .with_state(state);
+
+    let json_body = serde_json::json!({
+        "txn_id": "txn_ghost_echo",
+        "events": [
+            {
+                "content": { "body": "Bridged email body", "msgtype": "m.text" },
+                "event_id": "$ghostmsg:localhost",
+                "origin_server_ts": 1600000000000i64,
+                "room_id": "!room:localhost",
+                "sender": "@_jmap_anthropic=40anthropic.com:localhost",
+                "type": "m.room.message"
+            }
+        ]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/_matrix/app/v1/transactions/txn_ghost_echo")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&json_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    // On drop, the mock asserts expect(0): the bridge sent no "not logged in".
+}
+
+#[tokio::test]
 async fn test_invite_handling() {
     let mock_server = MockServer::start().await;
 
