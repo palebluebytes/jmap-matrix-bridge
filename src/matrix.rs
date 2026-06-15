@@ -17,6 +17,7 @@ use matrix_sdk::ruma::{
         account::register::v3::Request as RegisterRequest,
         authenticated_media::get_content::v1::Request as DownloadRequest,
         media::create_content::v3::Request as UploadRequest,
+        membership::invite_user::v3::{InvitationRecipient, Request as InviteRequest},
         membership::join_room_by_id::v3::Request as JoinRequest,
         message::send_message_event::v3::Request as SendMessageRequest,
         profile::{
@@ -469,6 +470,26 @@ impl MatrixClient {
         Ok(())
     }
 
+    /// Invite `user_id` to `room_id`, acting as the bridge bot (which created
+    /// the room and holds invite power). Needed before a ghost can join an
+    /// invite-only room it has left: a bare `/join` on a non-public room is
+    /// rejected with "cannot join a room that is not `public`".
+    pub async fn invite_to_room(&self, room_id: &str, user_id: &str) -> Result<()> {
+        let room_id = RoomId::parse(room_id)?;
+        let user_id = UserId::parse(user_id)?;
+
+        let request = InviteRequest::new(
+            room_id,
+            InvitationRecipient::UserId {
+                user_id: user_id.to_owned(),
+            },
+        );
+
+        let bot_id = UserId::parse(self.bot_user_id())?;
+        self.send_as_ghost(request, &bot_id, None).await?;
+        Ok(())
+    }
+
     /// Create a direct-message room and invite `invite_user_id`.
     ///
     /// Both `create_room_for_thread` and `create_room_for_contact` delegate
@@ -692,8 +713,17 @@ impl MatrixClient {
             Ok(resp) => Ok(resp),
             Err(e) if is_ghost_not_joined(&e) => {
                 tracing::info!(
-                    "Ghost {sender_id} not joined to room {room_id}; joining and retrying send"
+                    "Ghost {sender_id} not joined to room {room_id}; inviting, joining and retrying send"
                 );
+                // The room is invite-only, so re-invite the ghost (as the bot)
+                // before joining — a bare /join on a non-public room it has left
+                // is rejected. Invite is best-effort: it errors harmlessly if the
+                // ghost is already invited.
+                if let Err(invite_err) = self.invite_to_room(room_id, sender_id).await {
+                    tracing::debug!(
+                        "Invite of {sender_id} to {room_id} before rejoin failed (continuing): {invite_err:#}"
+                    );
+                }
                 self.join_room_as(room_id, sender_id).await?;
                 self.send_as_ghost(build()?, sender, timestamp).await
             }

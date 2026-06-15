@@ -88,7 +88,15 @@ async fn test_send_as_ghost_rejoins_on_membership_forbidden() {
         .mount(&mock_server)
         .await;
 
-    // The ghost must (re)join between the failed send and the retry.
+    // The bot must re-invite the ghost (invite-only room) ...
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/_matrix/client/v3/rooms/.*/invite$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    // ... and the ghost must (re)join, between the failed send and the retry.
     Mock::given(method("POST"))
         .and(path_regex(r"^/_matrix/client/v3/(rooms/.*/join|join/.*)"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
