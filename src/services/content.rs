@@ -24,9 +24,13 @@ impl EmailBody {
     pub fn from_email(email: &Email) -> Self {
         let subject = email.subject().unwrap_or(NO_SUBJECT);
 
-        if let Some((mut plain, is_truncated)) = email
+        // Prefer a genuine text/plain body. JMAP's textBody points at the HTML
+        // part when an email has no plain alternative, so guard on the part's
+        // content type — otherwise raw HTML is shown verbatim in the timeline.
+        if let Some((mut plain, is_truncated, content_type)) = email
             .text_body()
             .and_then(|parts| Self::extract_body(email, parts))
+            && content_type.as_deref() != Some("text/html")
         {
             if is_truncated {
                 plain.push_str("\n\n[Email truncated by server due to size limit]");
@@ -34,9 +38,17 @@ impl EmailBody {
             return Self { plain, html: None };
         }
 
-        if let Some((mut html, is_truncated)) = email
+        // HTML body — either from htmlBody, or a textBody that was actually
+        // text/html. Convert to text for the timeline and keep the HTML as the
+        // formatted body for clients that render it.
+        if let Some((mut html, is_truncated, _)) = email
             .html_body()
             .and_then(|parts| Self::extract_body(email, parts))
+            .or_else(|| {
+                email
+                    .text_body()
+                    .and_then(|parts| Self::extract_body(email, parts))
+            })
         {
             if is_truncated {
                 html.push_str(
@@ -56,12 +68,13 @@ impl EmailBody {
         }
     }
 
-    fn extract_body(email: &Email, parts: &[EmailBodyPart]) -> Option<(String, bool)> {
+    fn extract_body(email: &Email, parts: &[EmailBodyPart]) -> Option<(String, bool, Option<String>)> {
         let part = parts.first()?;
         let part_id = part.part_id()?;
+        let content_type = part.content_type().map(str::to_owned);
         email
             .body_value(part_id)
-            .map(|v| (v.value().to_owned(), v.is_truncated()))
+            .map(|v| (v.value().to_owned(), v.is_truncated(), content_type))
     }
 }
 
@@ -215,4 +228,61 @@ pub async fn append_user_signature(store: &Store, user_id: &str, body: &mut Stri
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EmailBody;
+    use jmap_client::email::Email;
+
+    fn email_from_json(v: serde_json::Value) -> Email {
+        serde_json::from_value(v).expect("valid Email json")
+    }
+
+    #[test]
+    fn html_only_email_is_converted_not_shown_raw() {
+        // JMAP returns the HTML part in textBody when an email has no plain
+        // alternative; the bridge must convert it, not show raw markup.
+        let email = email_from_json(serde_json::json!({
+            "id": "e1",
+            "threadId": "t1",
+            "textBody": [{ "partId": "1", "type": "text/html" }],
+            "bodyValues": {
+                "1": {
+                    "value": "<!DOCTYPE html><html><head><style>p{}</style></head><body><p>Hello <b>world</b></p></body></html>",
+                    "isTruncated": false
+                }
+            }
+        }));
+        let body = EmailBody::from_email(&email);
+        assert!(
+            !body.plain.contains("<!DOCTYPE") && !body.plain.contains("<html"),
+            "timeline body should be rendered text, not raw HTML: {}",
+            body.plain
+        );
+        assert!(
+            body.plain.to_lowercase().contains("hello"),
+            "rendered text should contain the message: {}",
+            body.plain
+        );
+        assert!(
+            body.html.as_deref().is_some_and(|h| h.contains("<body>")),
+            "the HTML should be kept as the formatted body"
+        );
+    }
+
+    #[test]
+    fn plain_text_email_is_used_verbatim() {
+        let email = email_from_json(serde_json::json!({
+            "id": "e2",
+            "threadId": "t2",
+            "textBody": [{ "partId": "1", "type": "text/plain" }],
+            "bodyValues": {
+                "1": { "value": "Just plain text", "isTruncated": false }
+            }
+        }));
+        let body = EmailBody::from_email(&email);
+        assert_eq!(body.plain, "Just plain text");
+        assert!(body.html.is_none());
+    }
 }
