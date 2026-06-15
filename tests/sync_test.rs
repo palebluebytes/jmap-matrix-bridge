@@ -608,9 +608,16 @@ async fn test_poll_handles_attachments() {
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
              "username": "user",
              "accounts": {
-                 "A123": { "name": "user", "isPersonal": true, "isReadOnly": false, "accountCapabilities": { "urn:ietf:params:jmap:core": {} } }
+                 "A123": { "name": "user", "isPersonal": true, "isReadOnly": false, "accountCapabilities": { "urn:ietf:params:jmap:mail": {} } }
              },
-             "primaryAccounts": { "urn:ietf:params:jmap:core": "A123" },
+             // Real Stalwart advertises the primary account under the `mail`
+             // capability and leaves `core` empty. Attachment bridging must
+             // resolve the account via the session's default/primary account,
+             // not a hard-coded `core` lookup. With the account under `core`
+             // here the old code passed while production failed with
+             // "No account"; pinning it to `mail` makes the .expect(1) download
+             // and upload mocks a real regression guard.
+             "primaryAccounts": { "urn:ietf:params:jmap:mail": "A123" },
              "apiUrl": format!("{}/api", mock_server.uri()),
              "downloadUrl": format!("{}/download/{{accountId}}/{{blobId}}/{{name}}", mock_server.uri()),
              "uploadUrl": "http://127.0.0.1/upload",

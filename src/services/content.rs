@@ -7,7 +7,6 @@ use jmap_client::client::Client;
 use jmap_client::email::{Email, EmailBodyPart};
 use tracing::warn;
 
-const JMAP_CORE_URN: &str = "urn:ietf:params:jmap:core";
 const NO_SUBJECT: &str = "(No Subject)";
 
 /// Internal representation of an email's content for bridging.
@@ -91,11 +90,12 @@ pub async fn handle_attachments(
 
     let session = client.session();
     let download_template = session.download_url();
-    let account_id = session
-        .primary_accounts()
-        .find(|(cap, _)| *cap == JMAP_CORE_URN)
-        .map(|(_, id)| id.as_str())
-        .context("No account")?;
+    // Use the session's default (primary) account, the same lookup the rest of
+    // the bridge uses. Filtering primaryAccounts for the `core` capability
+    // specifically returns nothing on Stalwart (which registers the primary
+    // account under the `mail` capability), so attachment downloads failed with
+    // "No account".
+    let account_id = client.default_account_id();
     let thread_id = email.thread_id();
     let mut latest_owned_id = None;
 
