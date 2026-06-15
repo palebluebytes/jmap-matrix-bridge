@@ -324,12 +324,15 @@ async fn handle_room_member_event(
     }
 
     if content.membership == matrix_sdk::ruma::events::room::member::MembershipState::Join {
-        let bot_user_id = state.client_manager.matrix.bot_user_id();
-        if sender_id == bot_user_id {
+        // Ignore joins by the bridge's own users (the bot and every `@_jmap_*`
+        // ghost). Ghosts auto-join their contact rooms, and ghosts have no JMAP
+        // session, so without this every contact room got a "Welcome! Please
+        // type `login`" posted when its ghost joined.
+        if sender_id.starts_with("@_jmap_") {
             return Ok(());
         }
 
-        // If a user joins a ghost room, ensure they are registered.
+        // If a real user joins a ghost room without a session, prompt them.
         if state
             .client_manager
             .store

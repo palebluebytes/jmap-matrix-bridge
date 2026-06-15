@@ -179,6 +179,95 @@ async fn test_ghost_authored_message_is_ignored() {
 }
 
 #[tokio::test]
+async fn test_ghost_join_does_not_post_welcome() {
+    // Ghosts auto-join their own contact rooms. A ghost has no JMAP session, so
+    // without filtering the appservice namespace, every contact room got a
+    // "Welcome! Please type `login`" posted when its ghost joined.
+    let mock_server = MockServer::start().await;
+
+    // Any greeting the bridge posts hits this endpoint. Expect ZERO.
+    Mock::given(method("PUT"))
+        .and(path_regex(
+            r"^/_matrix/client/v3/rooms/.*/send/m.room.message/.*",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "event_id": "$should_not_happen"
+        })))
+        .expect(0)
+        .mount(&mock_server)
+        .await;
+
+    let store = Store::new_in_memory(None).await.unwrap();
+    store
+        .save_user(&jmap_matrix_bridge::store::RegisteredUser {
+            matrix_user_id: "@inkpotmonkey:localhost".to_string(),
+            jmap_username: "thomas".to_string(),
+            jmap_token: "secret".to_string(),
+            jmap_url: mock_server.uri(),
+        })
+        .await
+        .unwrap();
+    // Mark the room as a contact (ghost) room so the buggy path WOULD prompt.
+    store
+        .save_room_ghost_mapping(
+            "!room:localhost",
+            "anthropic@anthropic.com",
+            "@inkpotmonkey:localhost",
+        )
+        .await
+        .unwrap();
+
+    let matrix = MatrixClient::new(&mock_server.uri(), "token", "localhost")
+        .await
+        .unwrap();
+    let client_manager = Arc::new(ClientManager::new(store, matrix, 10));
+    let state_store = Arc::new(StateStore::new());
+    let state = AppState {
+        client_manager,
+        state_store,
+        hs_token: "hs_token".to_string(),
+    };
+
+    let app = Router::new()
+        .route(
+            "/_matrix/app/v1/transactions/{txn_id}",
+            put(handle_transactions),
+        )
+        .with_state(state);
+
+    let ghost = "@_jmap_anthropic=40anthropic.com:localhost";
+    let json_body = serde_json::json!({
+        "txn_id": "txn_ghost_join",
+        "events": [
+            {
+                "content": { "membership": "join" },
+                "event_id": "$ghostjoin:localhost",
+                "origin_server_ts": 1600000000000i64,
+                "room_id": "!room:localhost",
+                "sender": ghost,
+                "state_key": ghost,
+                "type": "m.room.member"
+            }
+        ]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/_matrix/app/v1/transactions/txn_ghost_join")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&json_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    // On drop, the mock asserts expect(0): no welcome was posted.
+}
+
+#[tokio::test]
 async fn test_invite_handling() {
     let mock_server = MockServer::start().await;
 
