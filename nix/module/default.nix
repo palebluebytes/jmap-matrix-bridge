@@ -8,11 +8,13 @@
 let
   cfg = config.services.jmap-bridge;
 
-  # systemd credential name for user N's JMAP token.
+  # systemd credential names for user N's JMAP token / Matrix password.
   userCredName = i: "jmap-user-${toString i}";
+  userMatrixPwCredName = i: "jmap-matrix-pw-${toString i}";
 
-  # One `--user "…"` argument per declarative user. The token is referenced by
-  # the systemd credential path so it never appears in argv. systemd only
+  # One `--user "…"` argument per declarative user. The token (and optional
+  # Matrix password, used for double-puppet auto-join) are referenced by their
+  # systemd credential paths so they never appear in argv. systemd only
   # substitutes the `${VAR}` form mid-word (a bare `$VAR` is expanded only as a
   # standalone word), so we emit `${CREDENTIALS_DIRECTORY}` — escaped as `''${`
   # to stop Nix from interpolating it.
@@ -20,7 +22,11 @@ let
     i: u:
     ''--user "mxid=${u.matrixId},username=${u.jmapUsername},url=${
       if u.jmapUrl != null then u.jmapUrl else cfg.url
-    },token-file=''${CREDENTIALS_DIRECTORY}/${userCredName i}"'';
+    },token-file=''${CREDENTIALS_DIRECTORY}/${userCredName i}${
+      lib.optionalString (
+        u.matrixPasswordFile != null
+      ) ",matrix-password-file=\${CREDENTIALS_DIRECTORY}/${userMatrixPwCredName i}"
+    }"'';
   userArgsStr = lib.concatStringsSep " " (lib.imap0 mkUserArg cfg.users);
 in
 {
@@ -125,6 +131,17 @@ in
                 store path, to avoid exposing the secret.
               '';
             };
+            matrixPasswordFile = lib.mkOption {
+              type = lib.types.nullOr lib.types.str;
+              default = null;
+              description = ''
+                Optional absolute path on the target host to a file containing
+                this user's Matrix account password. When set, the bridge logs in
+                as the user to auto-accept the room invites it sends them (so they
+                don't manually accept every email room). Must NOT be a Nix store
+                path, to avoid exposing the secret.
+              '';
+            };
           };
         }
       );
@@ -144,6 +161,12 @@ in
     ++ lib.imap0 (i: u: {
       assertion = lib.hasPrefix "/" u.tokenFile && !lib.isStorePath (toString u.tokenFile);
       message = "services.jmap-bridge.users.${toString i}.tokenFile (${u.matrixId}) must be an absolute path on the target host and NOT a Nix store path (to avoid exposing secrets).";
+    }) cfg.users
+    ++ lib.imap0 (i: u: {
+      assertion =
+        u.matrixPasswordFile != null
+        -> (lib.hasPrefix "/" u.matrixPasswordFile && !lib.isStorePath (toString u.matrixPasswordFile));
+      message = "services.jmap-bridge.users.${toString i}.matrixPasswordFile (${u.matrixId}) must be an absolute path on the target host and NOT a Nix store path (to avoid exposing secrets).";
     }) cfg.users;
 
     systemd.services.jmap-bridge = {
@@ -193,7 +216,14 @@ in
             "encryption-key:${cfg.encryptionKeyFile}"
           ]
           # Per-declarative-user JMAP tokens, referenced by token-file in mkUserArg.
-          ++ lib.imap0 (i: u: "${userCredName i}:${u.tokenFile}") cfg.users;
+          ++ lib.imap0 (i: u: "${userCredName i}:${u.tokenFile}") cfg.users
+          # Optional per-user Matrix password for double-puppet auto-join.
+          ++ lib.concatLists (
+            lib.imap0 (
+              i: u:
+              lib.optional (u.matrixPasswordFile != null) "${userMatrixPwCredName i}:${u.matrixPasswordFile}"
+            ) cfg.users
+          );
 
         # Systemd Hardening & Sandboxing
         DynamicUser = true;

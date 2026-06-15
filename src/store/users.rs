@@ -65,6 +65,36 @@ impl Store {
         }
     }
 
+    /// Store a user's Matrix double-puppet access token, encrypted at rest if a
+    /// key is configured. Reuses the generic state kv table so no schema change
+    /// is needed. The user row must already exist (FK on `jmap_state`).
+    pub async fn set_matrix_puppet_token(&self, matrix_user_id: &str, token: &str) -> Result<()> {
+        let stored = if let Some(key) = &self.encryption_key {
+            crypto::encrypt(token, key).context("Failed to encrypt puppet token")?
+        } else {
+            token.to_owned()
+        };
+        self.save_jmap_state(matrix_user_id, crate::puppet::PUPPET_TOKEN_KEY, &stored)
+            .await
+    }
+
+    /// Read a user's stored Matrix double-puppet access token, if any.
+    pub async fn get_matrix_puppet_token(&self, matrix_user_id: &str) -> Result<Option<String>> {
+        let Some(stored) = self
+            .get_jmap_state(matrix_user_id, crate::puppet::PUPPET_TOKEN_KEY)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if let Some(key) = &self.encryption_key {
+            Ok(Some(
+                crypto::decrypt(&stored, key).context("Failed to decrypt puppet token")?,
+            ))
+        } else {
+            Ok(Some(stored))
+        }
+    }
+
     /// Save the user's custom signature.
     pub async fn set_user_signature(&self, matrix_user_id: &str, signature: &str) -> Result<()> {
         sqlx::query(

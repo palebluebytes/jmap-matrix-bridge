@@ -55,6 +55,7 @@ async fn test_multi_user_login_integration() {
     let state = routes::AppState {
         client_manager,
         state_store,
+        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(String::new(), "@_jmap_bot:localhost".to_string())),
         hs_token: "hs_token".to_string(),
     };
     let app = Router::new()

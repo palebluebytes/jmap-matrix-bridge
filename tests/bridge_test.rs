@@ -83,6 +83,7 @@ async fn test_full_bridge_cycle() {
     let state = AppState {
         client_manager: Arc::new(client_manager),
         state_store: Arc::new(state_store),
+        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(String::new(), "@_jmap_bot:localhost".to_string())),
         hs_token: "hs_token".to_string(),
     };
 
@@ -137,6 +138,7 @@ async fn test_handle_users_endpoint() {
     let state = AppState {
         client_manager: Arc::new(client_manager),
         state_store: Arc::new(state_store),
+        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(String::new(), "@_jmap_bot:localhost".to_string())),
         hs_token: "hs_token".to_string(),
     };
 
@@ -192,6 +194,7 @@ async fn test_handle_transactions_database_error() {
     let state = AppState {
         client_manager: Arc::new(client_manager),
         state_store: Arc::new(state_store),
+        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(String::new(), "@_jmap_bot:localhost".to_string())),
         hs_token: "hs_token".to_string(),
     };
 

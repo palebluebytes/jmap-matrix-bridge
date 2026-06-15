@@ -46,6 +46,7 @@ async fn test_help_command() {
     let state = AppState {
         client_manager,
         state_store,
+        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(String::new(), "@_jmap_bot:localhost".to_string())),
         hs_token: "hs_token".to_string(),
     };
 
@@ -138,6 +139,7 @@ async fn test_ghost_authored_message_is_ignored() {
     let state = AppState {
         client_manager,
         state_store,
+        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(String::new(), "@_jmap_bot:localhost".to_string())),
         hs_token: "hs_token".to_string(),
     };
 
@@ -225,6 +227,7 @@ async fn test_ghost_join_does_not_post_welcome() {
     let state = AppState {
         client_manager,
         state_store,
+        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(String::new(), "@_jmap_bot:localhost".to_string())),
         hs_token: "hs_token".to_string(),
     };
 
@@ -299,6 +302,7 @@ async fn test_invite_handling() {
     let state = AppState {
         client_manager,
         state_store,
+        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(String::new(), "@_jmap_bot:localhost".to_string())),
         hs_token: "hs_token".to_string(),
     };
 
@@ -390,6 +394,7 @@ async fn test_interactive_login_flow() {
     let state = AppState {
         client_manager,
         state_store: state_store.clone(),
+        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(String::new(), "@_jmap_bot:localhost".to_string())),
         hs_token: "hs_token".to_string(),
     };
 
@@ -595,6 +600,7 @@ async fn test_email_command_not_logged_in() {
     let state = AppState {
         client_manager,
         state_store,
+        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(String::new(), "@_jmap_bot:localhost".to_string())),
         hs_token: "hs_token".to_string(),
     };
 
@@ -649,6 +655,7 @@ async fn test_unknown_command() {
     let state = AppState {
         client_manager,
         state_store,
+        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(String::new(), "@_jmap_bot:localhost".to_string())),
         hs_token: "hs_token".to_string(),
     };
 
@@ -880,6 +887,7 @@ async fn test_reply_with_attachment_streaming() {
     let state = AppState {
         client_manager,
         state_store,
+        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(String::new(), "@_jmap_bot:localhost".to_string())),
         hs_token: "hs_token".to_string(),
     };
 

@@ -23,6 +23,7 @@ pub mod crypto;
 pub mod ghost;
 pub mod ingest;
 pub mod matrix;
+pub mod puppet;
 pub mod retry;
 pub mod routes;
 pub mod sender;

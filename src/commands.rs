@@ -3,6 +3,7 @@
 pub mod email;
 pub mod help;
 pub mod login;
+pub mod login_matrix;
 pub mod reply;
 pub mod signature;
 
@@ -49,6 +50,7 @@ impl CommandRouter {
         Self {
             commands: vec![
                 Box::new(help::HelpCommand),
+                Box::new(login_matrix::LoginMatrixCommand),
                 Box::new(login::LoginCommand),
                 Box::new(email::EmailCommand),
                 Box::new(signature::SignatureCommand),

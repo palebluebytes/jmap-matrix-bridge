@@ -4,6 +4,7 @@
 //! sent via the Application Service API.
 
 use crate::client_manager::ClientManager;
+use crate::puppet::PuppetManager;
 use crate::state::StateStore;
 use axum::{
     extract::{Json, Path, Request, State},
@@ -24,6 +25,7 @@ pub use crate::services::transactions::{MatrixTransaction, notify};
 pub struct AppState {
     pub client_manager: Arc<ClientManager>,
     pub state_store: Arc<StateStore>,
+    pub puppet_manager: Arc<PuppetManager>,
     pub hs_token: String,
 }
 

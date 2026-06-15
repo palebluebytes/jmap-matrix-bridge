@@ -119,6 +119,9 @@ struct UserSpec {
     /// JMAP session URL, or `None` to fall back to the global `--jmap-url`.
     url: Option<String>,
     token: String,
+    /// Optional Matrix account password, used to log in as this user and
+    /// auto-accept the bridge's room invites (double puppeting).
+    matrix_password: Option<String>,
 }
 
 /// Parse a single `--user` spec (`key=value,key=value,...`).
@@ -131,6 +134,7 @@ fn parse_user_spec(spec: &str) -> anyhow::Result<UserSpec> {
     let mut url = None;
     let mut token = None;
     let mut token_file = None;
+    let mut matrix_password_file = None;
 
     for segment in spec.split(',') {
         let segment = segment.trim();
@@ -147,6 +151,7 @@ fn parse_user_spec(spec: &str) -> anyhow::Result<UserSpec> {
             "url" => url = Some(value),
             "token" => token = Some(value),
             "token-file" => token_file = Some(value),
+            "matrix-password-file" => matrix_password_file = Some(value),
             other => anyhow::bail!("unknown --user key '{other}'"),
         }
     }
@@ -161,11 +166,23 @@ fn parse_user_spec(spec: &str) -> anyhow::Result<UserSpec> {
     };
     anyhow::ensure!(!token.is_empty(), "--user token is empty");
 
+    let matrix_password = match matrix_password_file {
+        Some(path) => {
+            let pw = std::fs::read_to_string(&path)
+                .with_context(|| format!("failed to read --user matrix-password-file '{path}'"))?
+                .trim()
+                .to_owned();
+            (!pw.is_empty()).then_some(pw)
+        }
+        None => None,
+    };
+
     Ok(UserSpec {
         mxid: mxid.context("--user requires mxid")?,
         username: username.context("--user requires username")?,
         url: url.filter(|u| !u.is_empty()),
         token,
+        matrix_password,
     })
 }
 
@@ -306,6 +323,14 @@ async fn main() -> anyhow::Result<()> {
             // Start manager (loads users from DB)
             client_manager.clone().start().await?;
 
+            // Matrix double-puppet auto-join manager: runs an auto-accept loop
+            // per user that has a Matrix token, so the bridge joins the rooms it
+            // invites them to instead of the user clicking "Start chatting".
+            let puppet_manager = Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(
+                matrix_url.clone(),
+                matrix.bot_user_id().to_string(),
+            ));
+
             // Spawn background database pruning task (runs every 24 hours)
             let pruning_store = store.clone();
             tokio::spawn(async move {
@@ -384,6 +409,36 @@ async fn main() -> anyhow::Result<()> {
                                 e
                             );
                         }
+                        // If a Matrix password was configured, log in as the
+                        // user to obtain a fresh double-puppet token and start
+                        // auto-accepting the bridge's invites for them.
+                        if let Some(pw) = &user.matrix_password {
+                            match jmap_matrix_bridge::puppet::login_password(
+                                &matrix_url,
+                                &user.mxid,
+                                pw,
+                            )
+                            .await
+                            {
+                                Ok(token) => {
+                                    if let Err(e) =
+                                        store.set_matrix_puppet_token(&user.mxid, &token).await
+                                    {
+                                        tracing::warn!(
+                                            "Failed to store puppet token for {}: {}",
+                                            user.mxid,
+                                            e
+                                        );
+                                    }
+                                    puppet_manager.ensure_running(user.mxid.clone(), token).await;
+                                }
+                                Err(e) => tracing::warn!(
+                                    "Matrix double-puppet login failed for {}: {}",
+                                    user.mxid,
+                                    e
+                                ),
+                            }
+                        }
                     }
                     Err(e) => {
                         tracing::error!("Invalid --user spec '{}': {}", spec, e);
@@ -391,9 +446,35 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
+            // Resume double-puppets for any user with a stored Matrix token that
+            // isn't already running (interactive `login-matrix` users, plus
+            // declarative users whose token was already saved). ensure_running is
+            // idempotent, so declarative users started above are not duplicated.
+            match store.get_all_users().await {
+                Ok(all_users) => {
+                    for user in all_users {
+                        match store.get_matrix_puppet_token(&user.matrix_user_id).await {
+                            Ok(Some(token)) => {
+                                puppet_manager
+                                    .ensure_running(user.matrix_user_id, token)
+                                    .await;
+                            }
+                            Ok(None) => {}
+                            Err(e) => tracing::warn!(
+                                "Failed to read puppet token for {}: {}",
+                                user.matrix_user_id,
+                                e
+                            ),
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!("Failed to list users to resume puppets: {}", e),
+            }
+
             let state = jmap_matrix_bridge::routes::AppState {
                 client_manager: client_manager.clone(),
                 state_store,
+                puppet_manager: puppet_manager.clone(),
                 hs_token: matrix_hs_token,
             };
 
