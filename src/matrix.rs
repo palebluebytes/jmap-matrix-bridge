@@ -29,6 +29,14 @@ use matrix_sdk::ruma::{
     events::room::message::{MessageType, RoomMessageEventContent},
 };
 
+/// True when a ghost send failed because the ghost is not joined to the room
+/// (Matrix replies with `M_FORBIDDEN` and "sender's membership `leave` is not
+/// `join`"). Such a send succeeds once the ghost (re)joins the room.
+fn is_ghost_not_joined(err: &anyhow::Error) -> bool {
+    let s = err.to_string();
+    s.contains("M_FORBIDDEN") && s.contains("is not `join`")
+}
+
 #[derive(Clone, Debug)]
 pub struct MatrixClient {
     pub(crate) client: matrix_sdk::Client,
@@ -155,6 +163,11 @@ impl MatrixClient {
             tracing::warn!(
                 "Matrix API error response for ghost {user_id} {method} {url}: {status} - body: {body_str}"
             );
+            // Surface the status and raw body so callers can react (e.g. join
+            // the ghost and retry on a membership 403). Parsing a non-success
+            // response with try_from_http_response would otherwise yield an
+            // opaque error that hides the errcode.
+            anyhow::bail!("Matrix API error [{status}]: {body_str}");
         }
 
         let http_resp = http_resp_builder.body(body)?;
@@ -630,29 +643,62 @@ impl MatrixClient {
             .transpose()
             .context("Invalid Thread Latest Event ID")?;
 
-        let mut content = formatted_body.map_or_else(
-            || RoomMessageEventContent::text_plain(body_text),
-            |html| RoomMessageEventContent::text_html(body_text, html),
-        );
+        let build = || -> Result<SendMessageRequest> {
+            let mut content = formatted_body.map_or_else(
+                || RoomMessageEventContent::text_plain(body_text),
+                |html| RoomMessageEventContent::text_html(body_text, html),
+            );
+            if let Some(root_id) = thread_root_id.clone() {
+                // Use the provided latest event, falling back to the root when
+                // this is the first message in the thread.
+                let latest_id = thread_latest_event_id.clone().unwrap_or_else(|| root_id.clone());
+                content.relates_to =
+                    Some(matrix_sdk::ruma::events::room::message::Relation::Thread(
+                        matrix_sdk::ruma::events::relation::Thread::plain(root_id, latest_id),
+                    ));
+            }
+            Ok(SendMessageRequest::new(
+                room_id.clone(),
+                Self::txn_id().into(),
+                &matrix_sdk::ruma::events::AnyMessageLikeEventContent::RoomMessage(content),
+            )?)
+        };
 
-        if let Some(root_id) = thread_root_id {
-            // Use the provided latest event, falling back to the root when this
-            // is the first message in the thread.
-            let latest_id = thread_latest_event_id.unwrap_or_else(|| root_id.clone());
-            content.relates_to = Some(matrix_sdk::ruma::events::room::message::Relation::Thread(
-                matrix_sdk::ruma::events::relation::Thread::plain(root_id, latest_id),
-            ));
-        }
-
-        let request = SendMessageRequest::new(
-            room_id,
-            Self::txn_id().into(),
-            &matrix_sdk::ruma::events::AnyMessageLikeEventContent::RoomMessage(content),
-        )?;
-
-        let sender_id = UserId::parse(sender_id)?;
-        let resp = self.send_as_ghost(request, &sender_id, timestamp).await?;
+        let sender = UserId::parse(sender_id)?;
+        let resp = self
+            .send_as_ghost_joining(room_id.as_str(), sender_id, &sender, timestamp, build)
+            .await?;
         Ok(resp.event_id.to_string())
+    }
+
+    /// Send a ghost request, self-healing the common "ghost not joined to the
+    /// room" 403. A ghost is joined to its contact room once at creation, but a
+    /// swallowed join error (or a room from an earlier run) can leave it absent,
+    /// after which every send fails. On that specific membership error we join
+    /// the ghost and retry the send once. `build` reconstructs the request so it
+    /// can be issued again (ruma requests are not cloneable).
+    async fn send_as_ghost_joining<F>(
+        &self,
+        room_id: &str,
+        sender_id: &str,
+        sender: &UserId,
+        timestamp: Option<u64>,
+        build: F,
+    ) -> Result<matrix_sdk::ruma::api::client::message::send_message_event::v3::Response>
+    where
+        F: Fn() -> Result<SendMessageRequest>,
+    {
+        match self.send_as_ghost(build()?, sender, timestamp).await {
+            Ok(resp) => Ok(resp),
+            Err(e) if is_ghost_not_joined(&e) => {
+                tracing::info!(
+                    "Ghost {sender_id} not joined to room {room_id}; joining and retrying send"
+                );
+                self.join_room_as(room_id, sender_id).await?;
+                self.send_as_ghost(build()?, sender, timestamp).await
+            }
+            Err(e) => Err(e),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -678,34 +724,39 @@ impl MatrixClient {
             .transpose()
             .context("Invalid Thread Latest Event ID")?;
 
-        let mut content = RoomMessageEventContent::new(MessageType::File(
-            matrix_sdk::ruma::events::room::message::FileMessageEventContent::plain(
-                file_name.to_owned(),
-                mxc_url,
-            ),
-        ));
-
-        if let MessageType::File(ref mut file) = content.msgtype {
-            let mut info = matrix_sdk::ruma::events::room::message::FileInfo::new();
-            info.mimetype = Some(mime_type.to_owned());
-            file.info = Some(Box::new(info));
-        }
-
-        if let Some(root_id) = thread_root_id {
-            let latest_id = thread_latest_event_id.unwrap_or_else(|| root_id.clone());
-            content.relates_to = Some(matrix_sdk::ruma::events::room::message::Relation::Thread(
-                matrix_sdk::ruma::events::relation::Thread::plain(root_id, latest_id),
+        let build = || -> Result<SendMessageRequest> {
+            let mut content = RoomMessageEventContent::new(MessageType::File(
+                matrix_sdk::ruma::events::room::message::FileMessageEventContent::plain(
+                    file_name.to_owned(),
+                    mxc_url.clone(),
+                ),
             ));
-        }
 
-        let request = SendMessageRequest::new(
-            room_id,
-            Self::txn_id().into(),
-            &matrix_sdk::ruma::events::AnyMessageLikeEventContent::RoomMessage(content),
-        )?;
+            if let MessageType::File(ref mut file) = content.msgtype {
+                let mut info = matrix_sdk::ruma::events::room::message::FileInfo::new();
+                info.mimetype = Some(mime_type.to_owned());
+                file.info = Some(Box::new(info));
+            }
 
-        let sender_id = UserId::parse(sender_id)?;
-        let resp = self.send_as_ghost(request, &sender_id, timestamp).await?;
+            if let Some(root_id) = thread_root_id.clone() {
+                let latest_id = thread_latest_event_id.clone().unwrap_or_else(|| root_id.clone());
+                content.relates_to =
+                    Some(matrix_sdk::ruma::events::room::message::Relation::Thread(
+                        matrix_sdk::ruma::events::relation::Thread::plain(root_id, latest_id),
+                    ));
+            }
+
+            Ok(SendMessageRequest::new(
+                room_id.clone(),
+                Self::txn_id().into(),
+                &matrix_sdk::ruma::events::AnyMessageLikeEventContent::RoomMessage(content),
+            )?)
+        };
+
+        let sender = UserId::parse(sender_id)?;
+        let resp = self
+            .send_as_ghost_joining(room_id.as_str(), sender_id, &sender, timestamp, build)
+            .await?;
         Ok(resp.event_id.to_string())
     }
 

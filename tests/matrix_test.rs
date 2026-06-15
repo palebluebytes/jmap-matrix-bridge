@@ -54,6 +54,73 @@ async fn test_send_message() {
 }
 
 #[tokio::test]
+async fn test_send_as_ghost_rejoins_on_membership_forbidden() {
+    // A ghost is joined to its room only once at creation (best-effort). If that
+    // join didn't take, every later send fails with 403 "membership `leave` is
+    // not `join`". send_message_as must self-heal: join the ghost and retry once.
+    let mock_server = MockServer::start().await;
+
+    // First send: ghost not in room -> 403 membership error (served once).
+    Mock::given(method("PUT"))
+        .and(path_regex(
+            r"^/_matrix/client/v3/rooms/.*/send/m.room.message/.*",
+        ))
+        .respond_with(ResponseTemplate::new(403).set_body_json(serde_json::json!({
+            "errcode": "M_FORBIDDEN",
+            "error": "Auth check failed: sender's membership `leave` is not `join`"
+        })))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    // Retry after the join succeeds.
+    Mock::given(method("PUT"))
+        .and(path_regex(
+            r"^/_matrix/client/v3/rooms/.*/send/m.room.message/.*",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "event_id": "$rejoined"
+        })))
+        .with_priority(2)
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    // The ghost must (re)join between the failed send and the retry.
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/_matrix/client/v3/(rooms/.*/join|join/.*)"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "room_id": "!room:localhost"
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let client = MatrixClient::new(&mock_server.uri(), "token", "localhost")
+        .await
+        .unwrap();
+    let result = client
+        .send_message_as(
+            "!room:localhost",
+            "Hello",
+            None,
+            None,
+            None,
+            "@_jmap_alice=40example.com:localhost",
+            None,
+        )
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "send_message_as should self-heal after joining: {result:?}"
+    );
+    assert_eq!(result.unwrap(), "$rejoined");
+}
+
+#[tokio::test]
 async fn test_send_message_threaded() {
     let mock_server = MockServer::start().await;
 
