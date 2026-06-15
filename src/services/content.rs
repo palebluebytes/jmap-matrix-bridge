@@ -175,7 +175,14 @@ async fn bridge_attachment(
         .await?
         .context("User session credentials missing from store")?;
 
-    let resp = http.get(&url).bearer_auth(&user.jmap_token).send().await?;
+    // The bridge authenticates to JMAP with Basic auth (jmap-client connects
+    // with `Credentials::Basic`), so the blob download must match. Sending a
+    // Bearer token here made Stalwart reject the download with 401.
+    let resp = http
+        .get(&url)
+        .basic_auth(&user.jmap_username, Some(&user.jmap_token))
+        .send()
+        .await?;
     if !resp.status().is_success() {
         anyhow::bail!("Download failed: {}", resp.status());
     }

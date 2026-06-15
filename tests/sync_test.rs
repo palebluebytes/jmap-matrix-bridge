@@ -10,7 +10,7 @@ use jmap_matrix_bridge::ingest::JmapPoller;
 use jmap_matrix_bridge::matrix::MatrixClient;
 use jmap_matrix_bridge::store::Store;
 use std::sync::Arc;
-use wiremock::matchers::{method, path};
+use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
@@ -546,9 +546,12 @@ async fn test_poll_handles_attachments() {
         .mount(&mock_server)
         .await;
 
-    // Mock Download Endpoint
+    // Mock Download Endpoint. The blob download must use Basic auth (the bridge
+    // connects to JMAP with Basic credentials); requiring it here makes the test
+    // fail if the download reverts to Bearer, which Stalwart rejects with 401.
     Mock::given(method("GET"))
         .and(path("/download/A123/blob1/test.png"))
+        .and(header("Authorization", "Basic dXNlcjp0b2tlbg=="))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![1, 2, 3, 4]))
         .expect(1)
         .mount(&mock_server)
