@@ -365,10 +365,10 @@ impl JmapSender {
         let (from_name, from_email) = self.primary_identity().await.unwrap_or_else(|| {
             (None, self.client.session().username().to_owned())
         });
-        let from_addr: jmap_client::email::EmailAddress = match from_name {
-            Some(name) => (name, from_email.clone()).into(),
-            None => from_email.clone().into(),
-        };
+        let from_addr: jmap_client::email::EmailAddress = from_name.map_or_else(
+            || from_email.clone().into(),
+            |name| (name, from_email.clone()).into(),
+        );
 
         let email = email_set.create_with_id("draft");
         email.mailbox_id(&mailbox_id, true);

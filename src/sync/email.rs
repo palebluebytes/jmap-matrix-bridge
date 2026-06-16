@@ -13,10 +13,16 @@ const NO_SUBJECT: &str = "(No Subject)";
 /// was sent by the bridge user themselves (the Sent copy re-ingested via
 /// `Email/changes`, which would otherwise loop).
 fn should_skip_inbound(sender_email: Option<&str>, own_email: Option<&str>) -> bool {
-    match sender_email {
-        None => true,
-        Some(addr) => own_email.is_some_and(|own| own.eq_ignore_ascii_case(addr)),
-    }
+    sender_email.is_none_or(|addr| own_email.is_some_and(|own| own.eq_ignore_ascii_case(addr)))
+}
+
+/// Matrix display name for a sender's ghost: `"Name (email)"`, or just the email
+/// when the sender provides no usable display name — so the address is always
+/// visible on every bridged message.
+fn ghost_display_name(name: Option<&str>, email: &str) -> String {
+    name.map(str::trim)
+        .filter(|n| !n.is_empty())
+        .map_or_else(|| email.to_owned(), |n| format!("{n} ({email})"))
 }
 
 impl JmapPoller {
@@ -392,10 +398,11 @@ impl JmapPoller {
         // Auto-register ghost
         self.matrix.ensure_user_exists(&localpart).await?;
 
-        // Sync profile display name
-        if let Some(display_name) = &name
-            && let Err(e) = self.matrix.set_display_name(&user_id, display_name).await
-        {
+        // Sync profile display name as "Name (email)" — or just the email when
+        // the sender has no name — so the address is always visible on every
+        // message, not hidden in the room topic / encoded mxid.
+        let display_name = ghost_display_name(name.as_deref(), email_addr);
+        if let Err(e) = self.matrix.set_display_name(&user_id, &display_name).await {
             warn!(error = %e, "Failed to sync ghost display name");
         }
 
@@ -408,7 +415,23 @@ impl JmapPoller {
 
 #[cfg(test)]
 mod tests {
-    use super::should_skip_inbound;
+    use super::{ghost_display_name, should_skip_inbound};
+
+    #[test]
+    fn display_name_combines_name_and_email() {
+        assert_eq!(
+            ghost_display_name(Some("Thomas Sean Dominic Kelly"), "thomassdk@pm.me"),
+            "Thomas Sean Dominic Kelly (thomassdk@pm.me)"
+        );
+    }
+
+    #[test]
+    fn display_name_falls_back_to_email() {
+        // No name, empty name, or whitespace -> just the address.
+        assert_eq!(ghost_display_name(None, "a@b.com"), "a@b.com");
+        assert_eq!(ghost_display_name(Some(""), "a@b.com"), "a@b.com");
+        assert_eq!(ghost_display_name(Some("   "), "a@b.com"), "a@b.com");
+    }
 
     #[test]
     fn skips_senderless_email() {
