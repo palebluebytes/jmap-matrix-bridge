@@ -8,6 +8,17 @@ use tracing::{info, instrument, warn};
 const UNKNOWN_SENDER: &str = "unknown@sender";
 const NO_SUBJECT: &str = "(No Subject)";
 
+/// Whether an email the poller fetched should NOT be bridged inbound: either it
+/// has no resolvable sender (would create a bogus `unknown@sender` room), or it
+/// was sent by the bridge user themselves (the Sent copy re-ingested via
+/// `Email/changes`, which would otherwise loop).
+fn should_skip_inbound(sender_email: Option<&str>, own_email: Option<&str>) -> bool {
+    match sender_email {
+        None => true,
+        Some(addr) => own_email.is_some_and(|own| own.eq_ignore_ascii_case(addr)),
+    }
+}
+
 impl JmapPoller {
     #[instrument(skip(self), fields(user = %self.matrix_user_id))]
     #[allow(clippy::too_many_lines)]
@@ -175,6 +186,18 @@ impl JmapPoller {
         let email_id = email.id().context("Email missing id")?;
         if self.store.has_message_mapped(email_id).await? {
             tracing::debug!(%email_id, "Email already mapped, skipping processing.");
+            return Ok(());
+        }
+
+        // Don't bridge the user's own outgoing mail. `Email/changes` returns the
+        // Sent copy of anything just sent, and bridging it would spawn a contact
+        // room for ourselves — or, when the sender header is absent, a bogus
+        // `unknown@sender` room — and loop. Mail with no resolvable sender is
+        // dropped for the same reason: a real inbound email always has a From.
+        let sender_email = email.from().and_then(<[_]>::first).map(|a| a.email());
+        let own_email = self.store.get_user_email(&self.matrix_user_id).await?;
+        if should_skip_inbound(sender_email, own_email.as_deref()) {
+            tracing::debug!(%email_id, ?sender_email, "Skipping the user's own / senderless email");
             return Ok(());
         }
 
@@ -380,5 +403,41 @@ impl JmapPoller {
             email: email_addr.to_owned(),
             user_id,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_skip_inbound;
+
+    #[test]
+    fn skips_senderless_email() {
+        // No From -> would otherwise create an `unknown@sender` room.
+        assert!(should_skip_inbound(None, Some("me@example.com")));
+        assert!(should_skip_inbound(None, None));
+    }
+
+    #[test]
+    fn skips_own_outgoing_email() {
+        // The Sent copy of our own message, re-ingested via Email/changes.
+        assert!(should_skip_inbound(
+            Some("me@example.com"),
+            Some("me@example.com")
+        ));
+        // Case-insensitive on the address.
+        assert!(should_skip_inbound(
+            Some("Me@Example.COM"),
+            Some("me@example.com")
+        ));
+    }
+
+    #[test]
+    fn bridges_real_inbound_from_a_contact() {
+        assert!(!should_skip_inbound(
+            Some("contact@elsewhere.com"),
+            Some("me@example.com")
+        ));
+        // If we don't yet know our own address, a real sender still bridges.
+        assert!(!should_skip_inbound(Some("contact@elsewhere.com"), None));
     }
 }

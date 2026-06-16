@@ -311,6 +311,25 @@ impl JmapSender {
         Ok(response.take_ids().into_iter().next())
     }
 
+    /// Fetch the account's primary sending identity as `(display name, email)`.
+    /// Returns `None` if the account exposes no identity carrying an email.
+    async fn primary_identity(&self) -> Option<(Option<String>, String)> {
+        let mut request = self.client.build();
+        request.get_identity();
+        let response = request
+            .send()
+            .await
+            .ok()?
+            .pop_method_response()?
+            .unwrap_get_identity()
+            .ok()?;
+        response.list().iter().find_map(|identity| {
+            identity
+                .email()
+                .map(|email| (identity.name().map(str::to_owned), email.to_owned()))
+        })
+    }
+
     /// Build and submit a JMAP batch request, returning the created email's ID.
     async fn submit(&self, params: EmailBuilder<'_>) -> Result<String> {
         // Every JMAP email must belong to at least one mailbox or the server
@@ -338,9 +357,23 @@ impl JmapSender {
             .1
             .email_set_mut();
 
+        // Resolve the account's own From identity. Outgoing mail MUST carry a
+        // `From:` header (RFC 5322) or relays/recipients reject it — and without
+        // it the Sent copy comes back senderless and gets re-bridged as a bogus
+        // `unknown@sender` room. Fall back to the session username only if the
+        // account exposes no identity.
+        let (from_name, from_email) = self.primary_identity().await.unwrap_or_else(|| {
+            (None, self.client.session().username().to_owned())
+        });
+        let from_addr: jmap_client::email::EmailAddress = match from_name {
+            Some(name) => (name, from_email.clone()).into(),
+            None => from_email.clone().into(),
+        };
+
         let email = email_set.create_with_id("draft");
         email.mailbox_id(&mailbox_id, true);
         email.subject(params.subject);
+        email.from(vec![from_addr]);
         email.to(vec![params.to]);
 
         if let Some(reply_to) = params.in_reply_to {
@@ -384,9 +417,9 @@ impl JmapSender {
         let submission = submission_set.create_with_id("sub");
         submission.email_id("#draft");
 
-        let mail_from = self.client.session().username().to_owned();
+        // Envelope return-path = the real address, not the bare login name.
         let rcpt_to = vec![params.to.to_owned()];
-        submission.envelope(mail_from, rcpt_to);
+        submission.envelope(from_email, rcpt_to);
 
         // — Send and unpack —
         let mut response = request.send().await?;

@@ -320,3 +320,108 @@ async fn test_upload_attachment_stream() {
     assert!(result.is_ok(), "upload_attachment_stream() should succeed");
     assert_eq!(result.unwrap(), "blob-uploaded-stream");
 }
+
+#[tokio::test]
+async fn test_send_email_sets_from_header_from_identity() {
+    let mock_server = MockServer::start().await;
+
+    // JMAP session discovery.
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+             "username": "thomas",
+             "accounts": {},
+             "primaryAccounts": {},
+             "apiUrl": format!("{}/api", mock_server.uri()),
+             "downloadUrl": "http://127.0.0.1/download",
+             "uploadUrl": "http://127.0.0.1/upload",
+             "eventSourceUrl": "http://127.0.0.1/events",
+             "capabilities": { "urn:ietf:params:jmap:core": {}, "urn:ietf:params:jmap:mail": {} },
+             "state": "s1"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // Identity/get -> the account's From identity (name + email).
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(|request: &wiremock::Request| {
+            let json: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            json.get("methodCalls").unwrap().as_array().unwrap().iter().any(|c| {
+                c.as_array().unwrap()[0].as_str().unwrap() == "Identity/get"
+            })
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Identity/get", {
+                "accountId": "acc1",
+                "state": "i1",
+                "list": [{ "id": "id1", "name": "Thomas", "email": "thomas@palebluebytes.space" }],
+                "notFound": []
+            }, "0"]]
+        })))
+        .with_priority(1)
+        .mount(&mock_server)
+        .await;
+
+    // Email/set must carry a `from` matching the identity (the bug: it didn't).
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(|request: &wiremock::Request| {
+            let json: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let calls = json.get("methodCalls").unwrap().as_array().unwrap();
+            for call in calls {
+                let arr = call.as_array().unwrap();
+                if arr[0].as_str().unwrap() == "Email/set" {
+                    let draft = arr[1].as_object().unwrap().get("create").unwrap()
+                        .as_object().unwrap().get("draft").unwrap().as_object().unwrap();
+                    let from = draft.get("from").expect("Email/set create must include `from`")
+                        .as_array().unwrap();
+                    assert_eq!(from.len(), 1);
+                    assert_eq!(from[0].get("email").unwrap().as_str().unwrap(), "thomas@palebluebytes.space");
+                    assert_eq!(from[0].get("name").unwrap().as_str().unwrap(), "Thomas");
+                    return true;
+                }
+            }
+            false
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [
+                ["Email/set", { "created": { "draft": { "id": "email-id-1" } } }, "0"],
+                ["EmailSubmission/set", { "created": { "submission": { "id": "sub-1" } } }, "1"]
+            ]
+        })))
+        .with_priority(2)
+        .mount(&mock_server)
+        .await;
+
+    // Mailbox/query for the Sent folder.
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(|request: &wiremock::Request| {
+            let json: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            json.get("methodCalls").unwrap().as_array().unwrap().iter().any(|c| {
+                c.as_array().unwrap()[0].as_str().unwrap() == "Mailbox/query"
+            })
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Mailbox/query", {
+                "accountId": "acc1", "queryState": "mq1", "position": 0, "ids": ["sent-id"]
+            }, "0"]]
+        })))
+        .with_priority(1)
+        .mount(&mock_server)
+        .await;
+
+    let client = jmap_client::client::Client::new()
+        .credentials(jmap_client::client::Credentials::bearer("dXNlcjpwYXNz"))
+        .connect(&format!("{}/.well-known/jmap", mock_server.uri()))
+        .await
+        .unwrap();
+    let sender = JmapSender::new(std::sync::Arc::new(client));
+
+    let result = sender.send_email("to@example.com", "Subject", "Body", vec![]).await;
+    assert!(result.is_ok(), "send_email() should succeed: {result:?}");
+    assert_eq!(result.unwrap(), "email-id-1");
+}
