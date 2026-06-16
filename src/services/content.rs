@@ -30,17 +30,18 @@ impl EmailBody {
         // contains HTML markup — some senders embed HTML islands (`<ol>`,
         // `<blockquote>`, `<figure>`) in their text/plain alternative, which
         // would otherwise be shown as literal tags in the timeline.
-        if let Some((mut plain, is_truncated, content_type)) = email
+        if let Some((plain, is_truncated, content_type)) = email
             .text_body()
             .and_then(|parts| Self::extract_body(email, parts))
             && content_type.as_deref() != Some("text/html")
             && !looks_like_html(&plain)
         {
+            let mut body = strip_quoted_reply(&plain);
             if is_truncated {
-                plain.push_str("\n\n[Email truncated by server due to size limit]");
+                body.push_str("\n\n[Email truncated by server due to size limit]");
             }
             return Self {
-                plain: normalize_plain(&plain),
+                plain: normalize_plain(&body),
                 html: None,
             };
         }
@@ -62,9 +63,9 @@ impl EmailBody {
                     "<br><br><strong>[Email truncated by server due to size limit]</strong>",
                 );
             }
-            let plain = normalize_plain(
+            let plain = normalize_plain(&strip_quoted_reply(
                 &html2text::from_read(html.as_bytes(), 80).unwrap_or_else(|_| html.clone()),
-            );
+            ));
             return Self {
                 plain,
                 html: Some(clean_html_for_matrix(&html)),
@@ -145,6 +146,10 @@ fn clean_html_for_matrix(html: &str) -> String {
     s = strip_region(&s, "<head", "</head>");
     s = strip_region(&s, "<style", "</style>");
     s = strip_region(&s, "<script", "</script>");
+    // Drop quoted-reply blocks (`<blockquote …>…</blockquote>`, as Proton/Gmail/
+    // Apple Mail wrap the quoted original): the prior message is already in the
+    // room, so it is noise in the formatted body.
+    s = strip_region(&s, "<blockquote", "</blockquote>");
     s = strip_region(&s, "<!doctype", ">");
 
     // Unwrap to the inner content of <body> … </body> if present.
@@ -157,6 +162,20 @@ fn clean_html_for_matrix(html: &str) -> String {
         if inner_start <= close {
             s = s[inner_start..close].to_owned();
         }
+    }
+
+    // Linearize table-based newsletter layouts: drop the scaffolding tags
+    // (keeping their content). Matrix clients strip the CSS that newsletters use
+    // for layout (max-width, word-break), so a `<table>` column is sized to its
+    // widest element (a code block or long URL) and stretches every paragraph
+    // onto ultra-wide, non-wrapping lines. Removing the table tags lets the
+    // paragraphs flow as top-level blocks and wrap to the viewport. Longest tag
+    // first so e.g. `<thead>` is gone before the `<th>` pass.
+    for tag in [
+        "table", "thead", "tbody", "tfoot", "colgroup", "col", "tr", "td", "th", "center",
+    ] {
+        s = strip_region(&s, &format!("<{tag}"), ">");
+        s = strip_region(&s, &format!("</{tag}"), ">");
     }
     s.trim().to_owned()
 }
@@ -186,6 +205,27 @@ fn normalize_plain(s: &str) -> String {
     out.trim().to_owned()
 }
 
+/// Drop the quoted-reply trailer that mail clients append when replying — the
+/// attribution line ("On … wrote:" / Outlook "Original Message" divider) and
+/// everything after it (the `>`-quoted original). In a Matrix room the prior
+/// message is already visible, so the quote is pure noise. Deliberately
+/// conservative: it only cuts at a recognized attribution line, so ordinary
+/// prose is never truncated. Line endings are normalized to `\n` (the following
+/// `normalize_plain` pass tidies the result regardless).
+#[must_use]
+fn strip_quoted_reply(s: &str) -> String {
+    let mut kept: Vec<&str> = Vec::new();
+    for line in s.lines() {
+        let t = line.trim();
+        let is_attribution = t.starts_with("On ") && t.ends_with("wrote:");
+        let is_divider = t.eq_ignore_ascii_case("-----original message-----");
+        if is_attribution || is_divider {
+            break;
+        }
+        kept.push(line);
+    }
+    kept.join("\n").trim_end().to_owned()
+}
 
 /// Bridge JMAP attachments to Matrix media repository and send them in the room.
 #[allow(clippy::too_many_arguments)]
@@ -448,10 +488,70 @@ mod tests {
     }
 
     #[test]
+    fn clean_html_linearizes_table_layout() {
+        use super::clean_html_for_matrix;
+        // A newsletter table wrapper must be unwrapped so the paragraphs flow as
+        // top-level blocks (otherwise Matrix renders them on ultra-wide lines).
+        let dirty = "<table style=\"max-width:600px\"><tbody><tr>\
+                     <td><p>First para</p><p>Second para</p></td></tr></tbody></table>";
+        let clean = clean_html_for_matrix(dirty);
+        assert_eq!(clean, "<p>First para</p><p>Second para</p>");
+    }
+
+    #[test]
     fn normalize_plain_strips_invisible_padding_and_blank_runs() {
         use super::normalize_plain;
         // soft hyphen + zero-width space padding, and 4 blank lines.
         let input = "Hi\u{00AD}\u{200B}there\n\n\n\n\nbye";
         assert_eq!(normalize_plain(input), "Hithere\n\nbye");
+    }
+
+    #[test]
+    fn strip_quoted_reply_cuts_attribution_and_quote() {
+        use super::strip_quoted_reply;
+        // ProtonMail-style reply: new text, then the attribution + `>` quote.
+        let input = "09123\n\nOn Tuesday, June 16th, 2026 at 23:23, \
+                     Thomas Kelly <thomas@palebluebytes.space> wrote:\n\n> 5678";
+        assert_eq!(strip_quoted_reply(input), "09123");
+        // Outlook divider variant.
+        let outlook = "my reply\n\n-----Original Message-----\nFrom: a@b\n> old";
+        assert_eq!(strip_quoted_reply(outlook), "my reply");
+        // No quote: text is preserved (line endings normalized to \n).
+        assert_eq!(
+            strip_quoted_reply("just a message\nsecond line"),
+            "just a message\nsecond line"
+        );
+        // A line that merely mentions writing is NOT an attribution.
+        assert_eq!(strip_quoted_reply("On call I said hi"), "On call I said hi");
+    }
+
+    #[test]
+    fn plain_reply_strips_quoted_trailer() {
+        // End-to-end: a plain-text reply carrying ProtonMail's quoted original
+        // must reach the timeline as just the new text.
+        let email = email_from_json(serde_json::json!({
+            "id": "e4",
+            "threadId": "t4",
+            "textBody": [{ "partId": "1", "type": "text/plain" }],
+            "bodyValues": {
+                "1": {
+                    "value": "09123\n\nOn Tuesday, June 16th, 2026 at 23:23, \
+                              Thomas Kelly <thomas@palebluebytes.space> wrote:\n\n> 5678",
+                    "isTruncated": false
+                }
+            }
+        }));
+        let body = EmailBody::from_email(&email);
+        assert_eq!(body.plain, "09123");
+        assert!(!body.plain.contains("> 5678") && !body.plain.contains("wrote:"));
+    }
+
+    #[test]
+    fn clean_html_strips_quoted_blockquote() {
+        use super::clean_html_for_matrix;
+        let dirty = "<p>my reply</p>\
+                     <blockquote type=\"cite\"><p>old quoted message</p></blockquote>";
+        let clean = clean_html_for_matrix(dirty);
+        assert_eq!(clean, "<p>my reply</p>");
     }
 }
