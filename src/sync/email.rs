@@ -225,7 +225,7 @@ impl JmapPoller {
         let ghost = self.resolve_ghost(email).await?;
         let body = EmailBody::from_email(email);
 
-        if let Some((root_event_id, room_id, latest_event_id)) =
+        if let Some((_root_event_id, room_id, _latest_event_id)) =
             self.store.get_thread_info(thread_id).await?
         {
             tracing::debug!(
@@ -233,15 +233,7 @@ impl JmapPoller {
                 thread_id,
                 room_id
             );
-            self.process_reply(
-                email,
-                &ghost,
-                &body,
-                &room_id,
-                &root_event_id,
-                latest_event_id.as_deref(),
-            )
-            .await
+            self.process_reply(email, &ghost, &body, &room_id).await
         } else {
             tracing::debug!(
                 "Email thread {} is not mapped yet. Creating new thread.",
@@ -257,21 +249,21 @@ impl JmapPoller {
         ghost: &GhostUser,
         body: &EmailBody,
         room_id: &str,
-        root_event_id: &str,
-        latest_event_id: Option<&str>,
     ) -> Result<()> {
         // Saturating multiply avoids i64 overflow for far-future timestamps.
         let timestamp = email
             .received_at()
             .map(|t| u64::try_from(t).unwrap_or(0).saturating_mul(1000));
+        // No Matrix m.thread relation: the room IS the email thread, so every
+        // message is posted flat as a plain timeline event.
         let event_id = self
             .matrix
             .send_message_as(
                 room_id,
                 &body.plain,
                 body.html.as_deref(),
-                Some(root_event_id),
-                latest_event_id,
+                None,
+                None,
                 &ghost.user_id,
                 timestamp,
             )
@@ -280,7 +272,8 @@ impl JmapPoller {
         self.store
             .save_message_mapping(email.id().expect("email id must be present"), &event_id)
             .await?;
-        // Update the latest event so the next reply threads correctly.
+        // Track the latest bridged event for the thread (used by outbound reply
+        // context), even though messages are no longer Matrix-threaded.
         if let Err(e) = self
             .store
             .update_thread_latest_event(thread_id, &event_id)
@@ -295,8 +288,8 @@ impl JmapPoller {
             &self.matrix_user_id,
             email,
             room_id,
-            Some(root_event_id),
-            Some(&event_id),
+            None,
+            None,
             &ghost.user_id,
             timestamp,
         )
@@ -319,12 +312,8 @@ impl JmapPoller {
         // handling instead.
         let lock_key = format!("thread:{thread_id}");
         loop {
-            if let Some((root_event_id, room_id, latest)) =
-                self.store.get_thread_info(thread_id).await?
-            {
-                return self
-                    .process_reply(email, ghost, body, &room_id, &root_event_id, latest.as_deref())
-                    .await;
+            if let Some((_root, room_id, _latest)) = self.store.get_thread_info(thread_id).await? {
+                return self.process_reply(email, ghost, body, &room_id).await;
             }
             if self.store.try_acquire_room_creation_lock(&lock_key).await? {
                 break;
@@ -339,11 +328,8 @@ impl JmapPoller {
             });
         });
         // Re-check under the lock.
-        if let Some((root_event_id, room_id, latest)) = self.store.get_thread_info(thread_id).await?
-        {
-            return self
-                .process_reply(email, ghost, body, &room_id, &root_event_id, latest.as_deref())
-                .await;
+        if let Some((_root, room_id, _latest)) = self.store.get_thread_info(thread_id).await? {
+            return self.process_reply(email, ghost, body, &room_id).await;
         }
 
         // Create a fresh room for this thread and name it after the subject.
@@ -391,8 +377,8 @@ impl JmapPoller {
             &self.matrix_user_id,
             email,
             &room_id,
-            Some(&event_id),
-            Some(&event_id),
+            None,
+            None,
             &ghost.user_id,
             timestamp,
         )
