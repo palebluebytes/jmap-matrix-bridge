@@ -405,6 +405,28 @@ pkgs.testers.nixosTest {
             })) + " | jq -r '.methodResponses[0][1].list[0].subject'").strip()
         print("Sent email subject=" + subject)
         print("OUTBOUND JMAP-accept assertion passed")
+
+        # ── SUBMISSION-RESPONSE check ────────────────────────────────────────
+        # Filing the copy in Sent (above) is NOT proof of delivery: the separate
+        # EmailSubmission/set can still be rejected. submit() (src/sender.rs)
+        # therefore inspects the submission response and fails loudly instead of
+        # reporting a phantom success -- the regression that silently dropped
+        # Matrix->email replies.
+        #
+        # This VM can only exercise the *rejection* half of that check: Stalwart
+        # refuses to provision a sending identity for a management-API account
+        # (Identity/set -> "Invalid e-mail address", Identity/get -> []), so the
+        # bridge's From is unroutable and every submission is rejected. We assert
+        # the bridge SURFACES that (error + retry queue) rather than swallowing
+        # it. On a provisioned server (kelpy) the submission is accepted and this
+        # branch is simply not hit.
+        machine.wait_until_succeeds(
+            "journalctl -u jmap-bridge | grep -q 'the JMAP submission was rejected'",
+            timeout=30)
+        machine.wait_until_succeeds(
+            "journalctl -u jmap-bridge | grep -q 'adding to retry queue'",
+            timeout=30)
+        print("SUBMISSION-RESPONSE assertion passed (rejection surfaced + queued, not silently succeeded)")
     finally:
         print("=== BRIDGE LOGS (after outbound) ===")
         print(machine.execute("journalctl -u jmap-bridge")[1])
@@ -444,7 +466,7 @@ pkgs.testers.nixosTest {
         # Contact replies to the bridge's outbound (References the chain, as a
         # real mail client does). Stalwart threads it into thread_a; the bridge
         # must route it into the EXISTING room.
-        machine.succeed(
+        reply_id = machine.succeed(
             jmap(["Email/set", {
                 "accountId": account_id,
                 "create": {"inj2": {
@@ -458,19 +480,25 @@ pkgs.testers.nixosTest {
                     "bodyStructure": {"type": "text/plain", "partId": "b2"},
                     "bodyValues": {"b2": {"value": "Reply from Alice"}},
                 }},
-            }, "0"]) + " | jq -e -r '.methodResponses[0][1].created.inj2.id'")
+            }, "0"]) + " | jq -e -r '.methodResponses[0][1].created.inj2.id'").strip()
+        print("contact reply email id=" + reply_id)
 
-        # Both inbound emails must have reached Matrix (the outbound Sent copy is
-        # skipped as self-authored, so it does not count).
-        have_two = "sqlite3 " + DB + " 'SELECT COUNT(*) FROM message_mapping;' | grep -q '^2$'"
+        # The contact reply must reach Matrix. Gate on THIS email specifically
+        # (message_mapping is keyed by jmap_email_id) rather than a total row
+        # count: this VM cannot grant the bridge a sending identity, so the
+        # bridge never learns its own address and cannot drop its own Sent copy
+        # as self-authored (kelpy, which has an identity, does drop it). A
+        # precise total would therefore race against that extra self-copy row.
+        have_reply = ("sqlite3 " + DB + " \"SELECT COUNT(*) FROM message_mapping "
+                      "WHERE jmap_email_id='" + reply_id + "';\" | grep -q '^1$'")
         try:
-            machine.wait_until_succeeds(have_two, timeout=40)
+            machine.wait_until_succeeds(have_reply, timeout=40)
         except Exception:
             print("No push-driven sync for the reply within 40s; forcing a poll")
             machine.succeed("systemctl restart jmap-bridge.service")
             machine.wait_until_succeeds(
                 "journalctl -u jmap-bridge | grep -q 'Subscribed to JMAP EventSource'", timeout=60)
-            machine.wait_until_succeeds(have_two, timeout=60)
+            machine.wait_until_succeeds(have_reply, timeout=60)
 
         # The reply joined the existing thread, so there is STILL exactly one room
         # for alice. If the outbound hadn't threaded, the reply would land in a new
