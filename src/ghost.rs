@@ -23,50 +23,20 @@ pub fn fresh_email_subject(room_name: Option<String>) -> String {
         .unwrap_or_else(|| "Matrix Conversation".to_owned())
 }
 
-/// Ensure a Matrix contact room exists for `email`, returning its room id.
+/// Create a fresh Matrix contact room for `email`, returning its room id.
 ///
-/// Reuses an existing room for this `(email, matrix_user_id)` pair; otherwise
-/// registers the ghost user, creates the room (inviting the real user + ghost),
-/// and persists the room↔email binding. Shared by the inbound poller and the
-/// `!compose` command so both provision rooms identically — the only difference
-/// is what triggers it (an incoming email vs. a user command).
-pub async fn ensure_contact_room(
+/// Registers the ghost user, creates the room (inviting the real user + ghost),
+/// persists the room↔email binding, and files the room under the user's email
+/// space. The bridge uses one room per email **thread**, and `!compose` starts a
+/// new conversation each time, so this always creates — callers that need to
+/// avoid duplicating a known thread lock and re-check the thread mapping first.
+pub async fn create_contact_room(
     matrix: &MatrixClient,
     store: &Store,
     matrix_user_id: &str,
     email: &str,
     display_name: &str,
 ) -> Result<String> {
-    let room_key = format!("ghost:{email}:user:{matrix_user_id}");
-
-    // Return as soon as a mapping exists; otherwise race for the creation lock so
-    // concurrent triggers (a command and an inbound email) don't double-create.
-    loop {
-        if let Some(room_id) = store.get_room_by_ghost(email, matrix_user_id).await? {
-            return Ok(room_id);
-        }
-        if store.try_acquire_room_creation_lock(&room_key).await? {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
-
-    // Release the lock however we exit this scope.
-    let store_clone = store.clone();
-    let room_key_clone = room_key.clone();
-    let _guard = scopeguard::guard((), move |()| {
-        tokio::spawn(async move {
-            if let Err(e) = store_clone.release_room_creation_lock(&room_key_clone).await {
-                error!("Failed to release room creation lock for {room_key_clone}: {e:?}");
-            }
-        });
-    });
-
-    // Another trigger may have created the room while we waited for the lock.
-    if let Some(room_id) = store.get_room_by_ghost(email, matrix_user_id).await? {
-        return Ok(room_id);
-    }
-
     // Register the ghost and sync its display name before creating the room.
     let localpart = email_to_localpart(email);
     let ghost_user_id = format!("@{localpart}:{}", matrix.domain);

@@ -200,7 +200,10 @@ impl JmapPoller {
         // room for ourselves — or, when the sender header is absent, a bogus
         // `unknown@sender` room — and loop. Mail with no resolvable sender is
         // dropped for the same reason: a real inbound email always has a From.
-        let sender_email = email.from().and_then(<[_]>::first).map(|a| a.email());
+        let sender_email = email
+            .from()
+            .and_then(<[_]>::first)
+            .map(jmap_client::email::EmailAddress::email);
         let own_email = self.store.get_user_email(&self.matrix_user_id).await?;
         if should_skip_inbound(sender_email, own_email.as_deref()) {
             tracing::debug!(%email_id, ?sender_email, "Skipping the user's own / senderless email");
@@ -307,15 +310,56 @@ impl JmapPoller {
         ghost: &GhostUser,
         body: &EmailBody,
     ) -> Result<()> {
-        let room_id = self.resolve_or_create_room(email, ghost).await?;
-
-        // Sync subject to room name
+        let thread_id = email.thread_id().expect("email thread_id must be present");
         let subject = email.subject().unwrap_or(NO_SUBJECT);
-        if let Ok(rid) = <&matrix_sdk::ruma::RoomId>::try_from(room_id.as_str())
-            && let Some(room) = self.matrix.client.get_room(rid)
-            && let Err(e) = room.set_name(subject.to_owned()).await
+
+        // One Matrix room per email thread. Lock by thread so two emails of the
+        // same new thread arriving together don't create two rooms; if another
+        // email won the race and already created the room, fall through to reply
+        // handling instead.
+        let lock_key = format!("thread:{thread_id}");
+        loop {
+            if let Some((root_event_id, room_id, latest)) =
+                self.store.get_thread_info(thread_id).await?
+            {
+                return self
+                    .process_reply(email, ghost, body, &room_id, &root_event_id, latest.as_deref())
+                    .await;
+            }
+            if self.store.try_acquire_room_creation_lock(&lock_key).await? {
+                break;
+            }
+            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        }
+        let store_clone = self.store.clone();
+        let lock_key_clone = lock_key.clone();
+        let _guard = scopeguard::guard((), move |()| {
+            tokio::spawn(async move {
+                let _ = store_clone.release_room_creation_lock(&lock_key_clone).await;
+            });
+        });
+        // Re-check under the lock.
+        if let Some((root_event_id, room_id, latest)) = self.store.get_thread_info(thread_id).await?
         {
-            warn!(error = %e, "Failed to set room name");
+            return self
+                .process_reply(email, ghost, body, &room_id, &root_event_id, latest.as_deref())
+                .await;
+        }
+
+        // Create a fresh room for this thread and name it after the subject.
+        let from_vec = email.from().unwrap_or(&[]);
+        let sender_name = from_vec.first().and_then(|f: &EmailAddress| f.name());
+        let display_name = ghost_display_name(sender_name, &ghost.email);
+        let room_id = crate::ghost::create_contact_room(
+            &self.matrix,
+            &self.store,
+            &self.matrix_user_id,
+            &ghost.email,
+            &display_name,
+        )
+        .await?;
+        if let Err(e) = self.matrix.set_room_name(&room_id, subject).await {
+            warn!(error = %e, "Failed to set thread room name");
         }
 
         // Saturating multiply avoids i64 overflow for far-future timestamps.
@@ -335,12 +379,7 @@ impl JmapPoller {
             )
             .await?;
         self.store
-            .save_thread_mapping_atomic(
-                email.thread_id().expect("email thread_id must be present"),
-                &event_id,
-                &room_id,
-                subject,
-            )
+            .save_thread_mapping_atomic(thread_id, &event_id, &room_id, subject)
             .await?;
         self.store
             .save_message_mapping(email.id().expect("email id must be present"), &event_id)
@@ -359,25 +398,6 @@ impl JmapPoller {
         )
         .await?;
         Ok(())
-    }
-
-    async fn resolve_or_create_room(&self, email: &Email, ghost: &GhostUser) -> Result<String> {
-        // Inbound rooms are provisioned by the same shared helper the `!compose`
-        // command uses, so the two paths can never drift. The display name comes
-        // from the sender's From header, falling back to the bare address.
-        let from_vec = email.from().unwrap_or(&[]);
-        let display_name = from_vec
-            .first()
-            .and_then(|f: &EmailAddress| f.name())
-            .unwrap_or(&ghost.email);
-        crate::ghost::ensure_contact_room(
-            &self.matrix,
-            &self.store,
-            &self.matrix_user_id,
-            &ghost.email,
-            display_name,
-        )
-        .await
     }
 
     async fn resolve_ghost(&self, email: &Email) -> Result<GhostUser> {

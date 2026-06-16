@@ -100,10 +100,10 @@ impl Command for ComposeCommand {
                 return Ok(());
             }
 
-            // Provision (or reuse) the contact room via the same helper the
-            // inbound poller uses. The display name defaults to the address
-            // since we've never seen this contact before.
-            let room_id = match crate::ghost::ensure_contact_room(
+            // Each `!compose` starts a new conversation room (one room per email
+            // chain), via the same helper the inbound poller uses. The display
+            // name defaults to the address since we've never seen this contact.
+            let room_id = match crate::ghost::create_contact_room(
                 &state.client_manager.matrix,
                 &state.client_manager.store,
                 ctx.sender_id,

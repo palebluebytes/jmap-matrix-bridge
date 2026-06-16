@@ -1,8 +1,8 @@
 #![allow(clippy::unwrap_used)]
 
-//! Tests for the `!compose` building blocks: the shared `ensure_contact_room`
-//! helper (must create a room once and reuse it thereafter) and the room-name
-//! state helpers used to carry the subject onto the first outbound email.
+//! Tests for the `!compose` building blocks: the shared `create_contact_room`
+//! helper (one room per email chain — a fresh room every call) and the room-name
+//! state helpers used to carry the subject onto the room / outbound email.
 
 use jmap_matrix_bridge::matrix::MatrixClient;
 use jmap_matrix_bridge::store::{RegisteredUser, Store};
@@ -24,7 +24,7 @@ async fn store_with_user(jmap_url: &str) -> Store {
 }
 
 #[tokio::test]
-async fn ensure_contact_room_creates_once_then_reuses() {
+async fn create_contact_room_creates_a_fresh_room_each_call() {
     let server = MockServer::start().await;
 
     // Ghost registration.
@@ -35,7 +35,7 @@ async fn ensure_contact_room_creates_once_then_reuses() {
         .await;
 
     // The email space is created on the first room only (more specific match on
-    // the m.space creation_content, higher priority).
+    // the m.space creation_content, higher priority) and reused afterwards.
     Mock::given(method("POST"))
         .and(path("/_matrix/client/v3/createRoom"))
         .and(body_partial_json(
@@ -50,8 +50,8 @@ async fn ensure_contact_room_creates_once_then_reuses() {
         .mount(&server)
         .await;
 
-    // The contact room must be created EXACTLY once across both compose calls —
-    // the second call has to reuse the stored mapping instead of creating again.
+    // The contact room is created EVERY call (one room per email chain), so two
+    // calls => two createRoom requests, NOT a reuse.
     Mock::given(method("POST"))
         .and(path("/_matrix/client/v3/createRoom"))
         .respond_with(
@@ -59,7 +59,7 @@ async fn ensure_contact_room_creates_once_then_reuses() {
                 .set_body_json(serde_json::json!({ "room_id": "!room1:localhost" })),
         )
         .with_priority(5)
-        .expect(1)
+        .expect(2)
         .mount(&server)
         .await;
 
@@ -74,37 +74,19 @@ async fn ensure_contact_room_creates_once_then_reuses() {
         .await
         .unwrap();
 
-    let r1 = jmap_matrix_bridge::ghost::ensure_contact_room(
-        &matrix,
-        &store,
-        "@alice:localhost",
-        "new@example.com",
-        "new@example.com",
-    )
-    .await
-    .unwrap();
-    let r2 = jmap_matrix_bridge::ghost::ensure_contact_room(
-        &matrix,
-        &store,
-        "@alice:localhost",
-        "new@example.com",
-        "new@example.com",
-    )
-    .await
-    .unwrap();
+    for _ in 0..2 {
+        jmap_matrix_bridge::ghost::create_contact_room(
+            &matrix,
+            &store,
+            "@alice:localhost",
+            "new@example.com",
+            "new@example.com",
+        )
+        .await
+        .unwrap();
+    }
 
-    assert_eq!(r1, "!room1:localhost");
-    assert_eq!(r1, r2, "second compose to the same address must reuse the room");
-    assert_eq!(
-        store
-            .get_room_by_ghost("new@example.com", "@alice:localhost")
-            .await
-            .unwrap()
-            .as_deref(),
-        Some("!room1:localhost"),
-        "exactly one room↔email binding should be persisted"
-    );
-    // The space was created once and remembered for reuse.
+    // The space is created once and remembered for reuse.
     assert_eq!(
         store
             .get_email_space_room("@alice:localhost")
@@ -114,8 +96,8 @@ async fn ensure_contact_room_creates_once_then_reuses() {
         Some("!space1:localhost"),
         "the email space should be created once and stored"
     );
-    // Dropping `server` asserts both createRoom calls (room + space) happened
-    // exactly once each — the second compose reused them.
+    // Dropping `server` asserts the contact createRoom fired twice (no reuse) and
+    // the space createRoom fired exactly once.
 }
 
 #[tokio::test]
