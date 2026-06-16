@@ -1,15 +1,90 @@
 //! Logic for handling messages sent to "ghost" rooms (representing external email addresses).
 
+use crate::matrix::MatrixClient;
 use crate::routes::{AppState, notify};
 use crate::sender::{JmapSender, human_bytes};
-use crate::store::ThreadRepository;
+use crate::store::{Store, ThreadRepository};
 use anyhow::{Context, Result};
 use jmap_client::client::Client;
 use jmap_client::email::Email;
 use matrix_sdk::ruma::events::room::message::{Relation, RoomMessageEventContent};
 use std::fmt::Write as _;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
+
+/// Subject for an outbound email sent into a room with no thread context.
+/// Prefers the room's own name (set by `!compose` to the user's chosen subject),
+/// falling back to a generic label.
+#[must_use]
+pub fn fresh_email_subject(room_name: Option<String>) -> String {
+    room_name
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "Matrix Conversation".to_owned())
+}
+
+/// Ensure a Matrix contact room exists for `email`, returning its room id.
+///
+/// Reuses an existing room for this `(email, matrix_user_id)` pair; otherwise
+/// registers the ghost user, creates the room (inviting the real user + ghost),
+/// and persists the room↔email binding. Shared by the inbound poller and the
+/// `!compose` command so both provision rooms identically — the only difference
+/// is what triggers it (an incoming email vs. a user command).
+pub async fn ensure_contact_room(
+    matrix: &MatrixClient,
+    store: &Store,
+    matrix_user_id: &str,
+    email: &str,
+    display_name: &str,
+) -> Result<String> {
+    let room_key = format!("ghost:{email}:user:{matrix_user_id}");
+
+    // Return as soon as a mapping exists; otherwise race for the creation lock so
+    // concurrent triggers (a command and an inbound email) don't double-create.
+    loop {
+        if let Some(room_id) = store.get_room_by_ghost(email, matrix_user_id).await? {
+            return Ok(room_id);
+        }
+        if store.try_acquire_room_creation_lock(&room_key).await? {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    // Release the lock however we exit this scope.
+    let store_clone = store.clone();
+    let room_key_clone = room_key.clone();
+    let _guard = scopeguard::guard((), move |()| {
+        tokio::spawn(async move {
+            if let Err(e) = store_clone.release_room_creation_lock(&room_key_clone).await {
+                error!("Failed to release room creation lock for {room_key_clone}: {e:?}");
+            }
+        });
+    });
+
+    // Another trigger may have created the room while we waited for the lock.
+    if let Some(room_id) = store.get_room_by_ghost(email, matrix_user_id).await? {
+        return Ok(room_id);
+    }
+
+    // Register the ghost and sync its display name before creating the room.
+    let localpart = email_to_localpart(email);
+    let ghost_user_id = format!("@{localpart}:{}", matrix.domain);
+    matrix.ensure_user_exists(&localpart).await?;
+    if let Err(e) = matrix.set_display_name(&ghost_user_id, display_name).await {
+        warn!(error = %e, "Failed to set ghost display name");
+    }
+
+    let room_id = matrix
+        .create_room_for_contact(display_name, email, matrix_user_id)
+        .await?;
+    info!("Created contact room {room_id} for ghost email: {email} (user: {matrix_user_id})");
+    store
+        .save_room_ghost_mapping(&room_id, email, matrix_user_id)
+        .await?;
+    let _ = matrix.join_room_as(&room_id, &ghost_user_id).await;
+    Ok(room_id)
+}
 
 /// Handle a message sent by a Matrix user to a ghost room.
 ///
@@ -109,9 +184,11 @@ pub async fn handle_ghost_outbound(
         return Ok(());
     }
 
-    // 4. Default: Send as a fresh email if no thread context found
-    info!("Sending fresh email to {} from ghost room", ghost_email);
-    let subject = "Matrix Conversation".to_owned();
+    // 4. Default: Send as a fresh email if no thread context found. Use the
+    //    room's name (set by `!compose` to the user's subject) as the email
+    //    subject, falling back to a generic label.
+    let subject = fresh_email_subject(state.client_manager.matrix.room_name(rm_id).await);
+    info!("Sending fresh email to {ghost_email} from ghost room (subject: {subject})");
 
     let sender = JmapSender::new(client);
     if let Err(e) = sender

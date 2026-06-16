@@ -81,6 +81,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_compose_command_matching() {
+        let router = CommandRouter::new();
+
+        for body in ["!compose new@example.com Subject", "!email-to new@example.com"] {
+            let content = RoomMessageEventContent::text_plain(body);
+            let ctx = CommandContext {
+                sender_id: "@alice:localhost",
+                body_str: body,
+                room_id: Some("!room:localhost"),
+                event_id: Some("$event:localhost"),
+                message_content: &content,
+            };
+            assert!(
+                router.matches_any(&ctx),
+                "Expected compose command to match: {body}"
+            );
+        }
+
+        // A word that merely starts with the command name must NOT match.
+        let content = RoomMessageEventContent::text_plain("!composed thoughts");
+        let ctx = CommandContext {
+            sender_id: "@alice:localhost",
+            body_str: "!composed thoughts",
+            room_id: Some("!room:localhost"),
+            event_id: Some("$event:localhost"),
+            message_content: &content,
+        };
+        assert!(
+            !router.matches_any(&ctx),
+            "Did not expect '!composed' to match the compose command"
+        );
+    }
+
+    #[tokio::test]
     async fn test_reply_command_matching() {
         let router = CommandRouter::new();
 

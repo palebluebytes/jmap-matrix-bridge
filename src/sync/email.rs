@@ -333,87 +333,22 @@ impl JmapPoller {
     }
 
     async fn resolve_or_create_room(&self, email: &Email, ghost: &GhostUser) -> Result<String> {
-        let room_key = format!("ghost:{}:user:{}", ghost.email, self.matrix_user_id);
-        tracing::debug!(
-            "Resolving or creating room for ghost email: {} for user: {}",
-            ghost.email,
-            self.matrix_user_id
-        );
-
-        // Use a loop to wait if another task is creating this room
-        loop {
-            if let Some(room_id) = self
-                .store
-                .get_room_by_ghost(&ghost.email, &self.matrix_user_id)
-                .await?
-            {
-                tracing::debug!(
-                    "Found existing room mapping for ghost {} and user {}: {}",
-                    ghost.email,
-                    self.matrix_user_id,
-                    room_id
-                );
-                return Ok(room_id);
-            }
-
-            // Try to acquire the database lock
-            if self.store.try_acquire_room_creation_lock(&room_key).await? {
-                tracing::debug!(
-                    "Acquired database room creation lock for ghost: {} (user: {})",
-                    ghost.email,
-                    self.matrix_user_id
-                );
-                break;
-            }
-
-            // Wait and retry
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-        }
-
-        // Ensure we release the lock when we're done
-        let store_clone = self.store.clone();
-        let room_key_clone = room_key.clone();
-        let _guard = scopeguard::guard((), move |()| {
-            tokio::spawn(async move {
-                if let Err(e) = store_clone
-                    .release_room_creation_lock(&room_key_clone)
-                    .await
-                {
-                    tracing::error!(
-                        "Failed to release database room creation lock for key {}: {:?}",
-                        room_key_clone,
-                        e
-                    );
-                } else {
-                    tracing::debug!(
-                        "Released database room creation lock for key: {}",
-                        room_key_clone
-                    );
-                }
-            });
-        });
-
+        // Inbound rooms are provisioned by the same shared helper the `!compose`
+        // command uses, so the two paths can never drift. The display name comes
+        // from the sender's From header, falling back to the bare address.
         let from_vec = email.from().unwrap_or(&[]);
-        let sender = from_vec.first();
-        let display_name = sender
+        let display_name = from_vec
+            .first()
             .and_then(|f: &EmailAddress| f.name())
             .unwrap_or(&ghost.email);
-
-        let room_id = self
-            .matrix
-            .create_room_for_contact(display_name, &ghost.email, &self.matrix_user_id)
-            .await?;
-        tracing::info!(
-            "Created new contact room {} for ghost email: {} (user: {})",
-            room_id,
-            ghost.email,
-            self.matrix_user_id
-        );
-        self.store
-            .save_room_ghost_mapping(&room_id, &ghost.email, &self.matrix_user_id)
-            .await?;
-        let _ = self.matrix.join_room_as(&room_id, &ghost.user_id).await;
-        Ok(room_id)
+        crate::ghost::ensure_contact_room(
+            &self.matrix,
+            &self.store,
+            &self.matrix_user_id,
+            &ghost.email,
+            display_name,
+        )
+        .await
     }
 
     async fn resolve_ghost(&self, email: &Email) -> Result<GhostUser> {

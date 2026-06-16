@@ -1,5 +1,6 @@
 //! Matrix → JMAP command parsing and interactive login flow.
 
+pub mod compose;
 pub mod email;
 pub mod help;
 pub mod login;
@@ -52,6 +53,7 @@ impl CommandRouter {
                 Box::new(help::HelpCommand),
                 Box::new(login_matrix::LoginMatrixCommand),
                 Box::new(login::LoginCommand),
+                Box::new(compose::ComposeCommand),
                 Box::new(email::EmailCommand),
                 Box::new(signature::SignatureCommand),
                 Box::new(reply::ReplyCommand),

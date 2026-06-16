@@ -88,6 +88,69 @@ impl MatrixClient {
         format!("@_jmap_bot:{}", self.domain)
     }
 
+    /// Build a `/rooms/{room_id}/state/m.room.name/` URL with each path segment
+    /// percent-encoded (room ids contain `!` and `:`).
+    fn room_name_state_url(&self, room_id: &str) -> Result<reqwest::Url> {
+        let mut url = reqwest::Url::parse(&self.homeserver_url)?;
+        url.path_segments_mut()
+            .map_err(|()| anyhow::anyhow!("homeserver URL cannot be a base"))?
+            .extend(&[
+                "_matrix",
+                "client",
+                "v3",
+                "rooms",
+                room_id,
+                "state",
+                "m.room.name",
+                "",
+            ]);
+        Ok(url)
+    }
+
+    /// Set a room's name via the state API, acting as the bridge bot (the room
+    /// creator, so it has the power level to do so). Used by `!compose` to label
+    /// a freshly-opened conversation with the user's chosen subject.
+    ///
+    /// Done over raw HTTP rather than `matrix_sdk`'s cached `Room::set_name`
+    /// because the appservice runs no `/sync`, so the SDK has no room state.
+    pub async fn set_room_name(&self, room_id: &str, name: &str) -> Result<()> {
+        let url = self.room_name_state_url(room_id)?;
+        let resp = self
+            .http_client
+            .put(url)
+            .bearer_auth(&self.as_token)
+            .json(&serde_json::json!({ "name": name }))
+            .send()
+            .await?;
+        anyhow::ensure!(
+            resp.status().is_success(),
+            "set_room_name failed: {}",
+            resp.status()
+        );
+        Ok(())
+    }
+
+    /// Best-effort read of a room's current name from the state API, or `None`
+    /// if unset/unreadable. Used to pick the subject for a fresh outbound email.
+    pub async fn room_name(&self, room_id: &str) -> Option<String> {
+        let url = self.room_name_state_url(room_id).ok()?;
+        let resp = self
+            .http_client
+            .get(url)
+            .bearer_auth(&self.as_token)
+            .send()
+            .await
+            .ok()?;
+        if !resp.status().is_success() {
+            return None;
+        }
+        let json: serde_json::Value = resp.json().await.ok()?;
+        json.get("name")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_owned)
+    }
+
     /// A unique transaction ID safe for use in Matrix PUT requests.
     ///
     /// Uses a UUID v4 rather than `SystemTime` to avoid the `unwrap()` that
