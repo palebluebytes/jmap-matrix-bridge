@@ -14,7 +14,7 @@ use jmap_client::Method;
 use jmap_client::blob::upload::UploadResponse;
 use jmap_client::client::Client;
 use jmap_client::core::request::Arguments;
-use jmap_client::email::{EmailBodyPart, EmailBodyValue};
+use jmap_client::email::{EmailBodyPart, EmailBodyValue, Property};
 use jmap_client::mailbox::Role as MailboxRole;
 use jmap_client::mailbox::query::Filter as MailboxFilter;
 
@@ -69,19 +69,58 @@ impl JmapSender {
         to: &str,
         subject: &str,
         body: &str,
-        in_reply_to: &str,
+        parent_email_id: &str,
         _thread_id: &str,
         attachments: Vec<AttachmentInfo>,
     ) -> Result<String> {
+        // Thread correctly using the parent's RFC 5322 Message-ID and references
+        // chain — NOT the JMAP internal email id (which means nothing to other
+        // mail servers or to Stalwart's own thread grouping).
+        let (in_reply_to, references) = self.reply_headers(parent_email_id).await;
+        let refs: Vec<&str> = references.iter().map(String::as_str).collect();
         self.submit(EmailBuilder {
             to,
             subject,
             body,
-            in_reply_to: Some(in_reply_to),
-            references: &[in_reply_to],
+            in_reply_to: in_reply_to.as_deref(),
+            references: &refs,
             attachments,
         })
         .await
+    }
+
+    /// Resolve a parent email's RFC `Message-ID` and `References` so a reply can
+    /// thread. Returns `(in_reply_to, references)` where `references` is the
+    /// parent's chain plus its own Message-ID. Best-effort: empty on failure
+    /// (the reply still sends, just unthreaded).
+    async fn reply_headers(&self, parent_email_id: &str) -> (Option<String>, Vec<String>) {
+        let mut request = self.client.build();
+        request
+            .get_email()
+            .ids([parent_email_id.to_owned()])
+            .properties([Property::MessageId, Property::References]);
+        let mut response = match request.send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, parent_email_id, "Failed to fetch parent for threading");
+                return (None, Vec::new());
+            }
+        };
+        let Some(email) = response
+            .pop_method_response()
+            .and_then(|r| r.unwrap_get_email().ok())
+            .and_then(|mut get| get.take_list().into_iter().next())
+        else {
+            return (None, Vec::new());
+        };
+        let message_id = email.message_id().and_then(<[String]>::first).cloned();
+        let mut references: Vec<String> = email.references().map(<[String]>::to_vec).unwrap_or_default();
+        if let Some(mid) = &message_id
+            && !references.iter().any(|r| r == mid)
+        {
+            references.push(mid.clone());
+        }
+        (message_id, references)
     }
 
     /// Returns the server-advertised maximum upload size in bytes.

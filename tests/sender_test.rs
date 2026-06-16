@@ -33,6 +33,33 @@ async fn test_reply_to_email_sets_references() {
         .mount(&mock_server)
         .await;
 
+    // reply_to_email first fetches the parent's RFC Message-ID/References so the
+    // reply threads. Answer that Email/get.
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(|request: &wiremock::Request| {
+            let json: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            json["methodCalls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c[0] == "Email/get")
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Email/get", {
+                "accountId": "acc1", "state": "s1", "notFound": [],
+                "list": [{
+                    "id": "message-id-123",
+                    "messageId": ["<msgid-1@example.com>"],
+                    "references": ["<root@example.com>"]
+                }]
+            }, "0"]]
+        })))
+        .with_priority(1)
+        .mount(&mock_server)
+        .await;
+
     Mock::given(method("POST"))
         .and(path("/api"))
         .and(|request: &wiremock::Request| {
@@ -48,11 +75,15 @@ async fn test_reply_to_email_sets_references() {
                         .unwrap()
                         .as_object()
                         .unwrap();
-                    let email = create.get("draft").unwrap();
-                    let email_obj = email.as_object().unwrap();
-                    let references = email_obj.get("references").unwrap().as_array().unwrap();
-                    assert_eq!(references.len(), 1);
-                    assert_eq!(references[0].as_str().unwrap(), "message-id-123");
+                    let email = create.get("draft").unwrap().as_object().unwrap();
+                    // In-Reply-To must be the parent's real RFC Message-ID, not
+                    // the JMAP internal id we were handed.
+                    let in_reply_to = email.get("inReplyTo").unwrap().as_array().unwrap();
+                    assert_eq!(in_reply_to[0].as_str().unwrap(), "<msgid-1@example.com>");
+                    // References = the parent's chain + its Message-ID.
+                    let references = email.get("references").unwrap().as_array().unwrap();
+                    assert_eq!(references[0].as_str().unwrap(), "<root@example.com>");
+                    assert_eq!(references[1].as_str().unwrap(), "<msgid-1@example.com>");
                     return true;
                 }
             }
