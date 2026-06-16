@@ -70,7 +70,7 @@ async fn test_reply_to_email_sets_references() {
                 }, "0"],
                 ["EmailSubmission/set", {
                     "created": {
-                        "submission": {
+                        "sub": {
                             "id": "sub-id-789"
                         }
                     }
@@ -189,29 +189,10 @@ async fn test_send_email_with_attachments() {
         })
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "sessionState": "s1",
-            "methodResponses": [["Email/set", {
-                "created": {
-                    "draft": {
-                        "id": "email-id-456"
-                    }
-                }
-            }, "0"]]
-        })))
-        .mount(&mock_server)
-        .await;
-
-    // Mock EmailSubmission/set
-    Mock::given(method("POST"))
-        .and(path("/api"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "sessionState": "s1",
-            "methodResponses": [["EmailSubmission/set", {
-                "created": {
-                    "sub": {
-                        "id": "sub-id-789"
-                    }
-                }
-            }, "1"]]
+            "methodResponses": [
+                ["Email/set", { "created": { "draft": { "id": "email-id-456" } } }, "0"],
+                ["EmailSubmission/set", { "created": { "sub": { "id": "sub-id-789" } } }, "1"]
+            ]
         })))
         .mount(&mock_server)
         .await;
@@ -388,7 +369,7 @@ async fn test_send_email_sets_from_header_from_identity() {
             "sessionState": "s1",
             "methodResponses": [
                 ["Email/set", { "created": { "draft": { "id": "email-id-1" } } }, "0"],
-                ["EmailSubmission/set", { "created": { "submission": { "id": "sub-1" } } }, "1"]
+                ["EmailSubmission/set", { "created": { "sub": { "id": "sub-1" } } }, "1"]
             ]
         })))
         .with_priority(2)
@@ -424,4 +405,89 @@ async fn test_send_email_sets_from_header_from_identity() {
     let result = sender.send_email("to@example.com", "Subject", "Body", vec![]).await;
     assert!(result.is_ok(), "send_email() should succeed: {result:?}");
     assert_eq!(result.unwrap(), "email-id-1");
+}
+
+#[tokio::test]
+async fn send_email_errors_when_submission_is_rejected() {
+    let mock_server = MockServer::start().await;
+
+    // Session discovery.
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+             "username": "thomas", "accounts": {}, "primaryAccounts": {},
+             "apiUrl": format!("{}/api", mock_server.uri()),
+             "downloadUrl": "http://127.0.0.1/download", "uploadUrl": "http://127.0.0.1/upload",
+             "eventSourceUrl": "http://127.0.0.1/events",
+             "capabilities": { "urn:ietf:params:jmap:core": {}, "urn:ietf:params:jmap:mail": {} },
+             "state": "s1"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // Identity/get.
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(|r: &wiremock::Request| {
+            let j: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+            j["methodCalls"].as_array().unwrap().iter().any(|c| c[0] == "Identity/get")
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "methodResponses": [["Identity/get", {
+                "accountId": "acc1", "state": "i1",
+                "list": [{ "id": "id1", "name": "Thomas", "email": "thomas@palebluebytes.space" }],
+                "notFound": []
+            }, "0"]]
+        })))
+        .with_priority(1)
+        .mount(&mock_server)
+        .await;
+
+    // Mailbox/query (Sent).
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(|r: &wiremock::Request| {
+            let j: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+            j["methodCalls"].as_array().unwrap().iter().any(|c| c[0] == "Mailbox/query")
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "methodResponses": [["Mailbox/query", {
+                "accountId": "acc1", "queryState": "mq1", "position": 0, "ids": ["sent-id"]
+            }, "0"]]
+        })))
+        .with_priority(1)
+        .mount(&mock_server)
+        .await;
+
+    // Email created, but the submission is REJECTED — must surface as an error,
+    // not a false success (the bug: the message would sit in Sent undelivered).
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(|r: &wiremock::Request| {
+            let j: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+            j["methodCalls"].as_array().unwrap().iter().any(|c| c[0] == "Email/set")
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "methodResponses": [
+                ["Email/set", { "created": { "draft": { "id": "email-id-1" } } }, "0"],
+                ["EmailSubmission/set", {
+                    "notCreated": { "sub": { "type": "forbiddenFrom", "description": "From not allowed" } }
+                }, "1"]
+            ]
+        })))
+        .with_priority(2)
+        .mount(&mock_server)
+        .await;
+
+    let client = jmap_client::client::Client::new()
+        .credentials(jmap_client::client::Credentials::bearer("dXNlcjpwYXNz"))
+        .connect(&format!("{}/.well-known/jmap", mock_server.uri()))
+        .await
+        .unwrap();
+    let sender = JmapSender::new(std::sync::Arc::new(client));
+
+    let result = sender.send_email("to@example.com", "Subject", "Body", vec![]).await;
+    assert!(
+        result.is_err(),
+        "a rejected submission must be an error, not a silent success"
+    );
 }

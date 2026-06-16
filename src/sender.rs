@@ -311,9 +311,10 @@ impl JmapSender {
         Ok(response.take_ids().into_iter().next())
     }
 
-    /// Fetch the account's primary sending identity as `(display name, email)`.
-    /// Returns `None` if the account exposes no identity carrying an email.
-    async fn primary_identity(&self) -> Option<(Option<String>, String)> {
+    /// Fetch the account's primary sending identity as `(id, display name,
+    /// email)`. Returns `None` if the account exposes no identity carrying an
+    /// email.
+    async fn primary_identity(&self) -> Option<(Option<String>, Option<String>, String)> {
         let mut request = self.client.build();
         request.get_identity();
         let response = request
@@ -324,9 +325,13 @@ impl JmapSender {
             .unwrap_get_identity()
             .ok()?;
         response.list().iter().find_map(|identity| {
-            identity
-                .email()
-                .map(|email| (identity.name().map(str::to_owned), email.to_owned()))
+            identity.email().map(|email| {
+                (
+                    identity.id().map(str::to_owned),
+                    identity.name().map(str::to_owned),
+                    email.to_owned(),
+                )
+            })
         })
     }
 
@@ -362,9 +367,10 @@ impl JmapSender {
         // it the Sent copy comes back senderless and gets re-bridged as a bogus
         // `unknown@sender` room. Fall back to the session username only if the
         // account exposes no identity.
-        let (from_name, from_email) = self.primary_identity().await.unwrap_or_else(|| {
-            (None, self.client.session().username().to_owned())
-        });
+        let (identity_id, from_name, from_email) =
+            self.primary_identity().await.unwrap_or_else(|| {
+                (None, None, self.client.session().username().to_owned())
+            });
         let from_addr: jmap_client::email::EmailAddress = from_name.map_or_else(
             || from_email.clone().into(),
             |name| (name, from_email.clone()).into(),
@@ -416,7 +422,12 @@ impl JmapSender {
 
         let submission = submission_set.create_with_id("sub");
         submission.email_id("#draft");
-
+        // Bind the submission to the account's sending identity. Stalwart rejects
+        // submissions whose envelope/From can't be tied to a known identity, so
+        // without this the message is saved to Sent but never queued for delivery.
+        if let Some(id) = &identity_id {
+            submission.identity_id(id.clone());
+        }
         // Envelope return-path = the real address, not the bare login name.
         let rcpt_to = vec![params.to.to_owned()];
         submission.envelope(from_email, rcpt_to);
@@ -424,12 +435,23 @@ impl JmapSender {
         // — Send and unpack —
         let mut response = request.send().await?;
         let mut email_set_resp = response.method_response_by_pos(0).unwrap_set_email()?;
-        let created = email_set_resp.created("draft")?;
-        let email_id = created
+        let email_id = email_set_resp
+            .created("draft")?
             .id()
-            .context("JMAP response did not include an ID for the created email")?;
+            .context("JMAP response did not include an ID for the created email")?
+            .to_owned();
 
-        Ok(email_id.to_owned())
+        // `method_response_by_pos` removes by index, so after taking position 0
+        // the EmailSubmission response is now at position 0. Verify the
+        // submission was actually accepted — otherwise the message sits in Sent
+        // but is never delivered, and we would wrongly report success.
+        response
+            .method_response_by_pos(0)
+            .unwrap_set_email_submission()?
+            .created("sub")
+            .context("email saved to Sent but the JMAP submission was rejected (not delivered)")?;
+
+        Ok(email_id)
     }
 }
 
