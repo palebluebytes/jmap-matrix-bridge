@@ -229,6 +229,12 @@ pkgs.testers.nixosTest {
         # Single-quote a JSON string for the shell (JSON never contains single quotes).
         return "'" + s + "'"
 
+    def jmap(*calls):
+        # Build a `curl` invocation for a JMAP request as bridgeuser.
+        body = json.dumps({"using": USING, "methodCalls": list(calls)})
+        return ("curl -sS " + AUTH + " -X POST " + JMAP + "/jmap " + HDR
+                + " -d " + json_arg(body))
+
     # ── Create a real mail account (fallback-admin has no JMAP mailbox) ──────────
     machine.wait_for_open_port(8082, timeout=30)
     print("=== create domain ===")
@@ -401,6 +407,80 @@ pkgs.testers.nixosTest {
         print("OUTBOUND JMAP-accept assertion passed")
     finally:
         print("=== BRIDGE LOGS (after outbound) ===")
+        print(machine.execute("journalctl -u jmap-bridge")[1])
+        print("===================")
+
+    # ════════════════════════════════════════════════════════════════════════════
+    # THREADING: the outbound reply must be a real RFC reply — same JMAP thread as
+    # the inbound and referencing its Message-ID — and a contact reply back to it
+    # must land in the SAME room, not spawn a new one (per-thread grouping).
+    # ════════════════════════════════════════════════════════════════════════════
+    try:
+        # The injected inbound (M1): its real Message-ID + thread.
+        m1 = json.loads(machine.succeed(
+            jmap(["Email/get", {"accountId": account_id, "ids": [created.strip()],
+                                "properties": ["messageId", "threadId"]}, "0"])
+            + " | jq -c '.methodResponses[0][1].list[0]'"))
+        m1_msgid = m1["messageId"][0]
+        thread_a = m1["threadId"]
+        print("M1 messageId=" + m1_msgid + " thread=" + thread_a)
+
+        # The outbound reply must share M1's thread and reference its Message-ID
+        # (the reply-threading fix: headers come from the JMAP thread, not the
+        # JMAP internal id).
+        out = json.loads(machine.succeed(
+            jmap(["Email/get", {"accountId": account_id, "ids": [first_id],
+                                "properties": ["messageId", "inReplyTo", "references", "threadId"]}, "0"])
+            + " | jq -c '.methodResponses[0][1].list[0]'"))
+        print("OUT inReplyTo=" + str(out.get("inReplyTo")) + " refs=" + str(out.get("references"))
+              + " thread=" + str(out.get("threadId")))
+        assert out.get("threadId") == thread_a, \
+            "outbound reply must share the inbound thread (got " + str(out.get("threadId")) + ")"
+        chain = (out.get("references") or []) + (out.get("inReplyTo") or [])
+        assert m1_msgid in chain, "outbound reply must reference the inbound Message-ID"
+        out_msgid = out["messageId"][0]
+        print("THREADING outbound assertion passed")
+
+        # Contact replies to the bridge's outbound (References the chain, as a
+        # real mail client does). Stalwart threads it into thread_a; the bridge
+        # must route it into the EXISTING room.
+        machine.succeed(
+            jmap(["Email/set", {
+                "accountId": account_id,
+                "create": {"inj2": {
+                    "mailboxIds": {inbox_id: True},
+                    "keywords": {"$seen": False},
+                    "from": [{"name": "Alice Tester", "email": "alice@example.com"}],
+                    "to": [{"email": "bridgeuser@localhost"}],
+                    "subject": "Re: Round-trip probe",
+                    "inReplyTo": [out_msgid],
+                    "references": [m1_msgid, out_msgid],
+                    "bodyStructure": {"type": "text/plain", "partId": "b2"},
+                    "bodyValues": {"b2": {"value": "Reply from Alice"}},
+                }},
+            }, "0"]) + " | jq -e -r '.methodResponses[0][1].created.inj2.id'")
+
+        # Both inbound emails must have reached Matrix (the outbound Sent copy is
+        # skipped as self-authored, so it does not count).
+        have_two = "sqlite3 " + DB + " 'SELECT COUNT(*) FROM message_mapping;' | grep -q '^2$'"
+        try:
+            machine.wait_until_succeeds(have_two, timeout=40)
+        except Exception:
+            print("No push-driven sync for the reply within 40s; forcing a poll")
+            machine.succeed("systemctl restart jmap-bridge.service")
+            machine.wait_until_succeeds(
+                "journalctl -u jmap-bridge | grep -q 'Subscribed to JMAP EventSource'", timeout=60)
+            machine.wait_until_succeeds(have_two, timeout=60)
+
+        # The reply joined the existing thread, so there is STILL exactly one room
+        # for alice. If the outbound hadn't threaded, the reply would land in a new
+        # thread -> a second room here.
+        machine.succeed(
+            "sqlite3 " + DB + " \"SELECT COUNT(*) FROM room_ghost_mapping "
+            "WHERE ghost_email='alice@example.com';\" | grep -q '^1$'")
+        print("THREADING same-room assertion passed (reply threaded into the existing room)")
+    finally:
+        print("=== BRIDGE LOGS (after threading) ===")
         print(machine.execute("journalctl -u jmap-bridge")[1])
         print("===================")
   '';
