@@ -88,6 +88,16 @@ in
       description = "The logging level for the bridge (error, warn, info, debug, trace)";
     };
 
+    bridgeMailboxes = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Mirror JMAP mailboxes (Inbox/Sent/Drafts/…) as their own Matrix rooms.
+        Off by default: email content lives in per-contact/per-thread rooms, so
+        the mailbox rooms are just clutter.
+      '';
+    };
+
     users = lib.mkOption {
       default = [ ];
       description = ''
@@ -187,6 +197,7 @@ in
         DATABASE_URL = "sqlite:${cfg.databaseUrl}";
         JMAP_URL = cfg.url;
         MATRIX_URL = cfg.matrixUrl;
+        BRIDGE_MAILBOXES = lib.boolToString cfg.bridgeMailboxes;
       };
 
       serviceConfig = {

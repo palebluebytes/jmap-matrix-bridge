@@ -151,6 +151,7 @@ async fn test_poll_with_mock_jmap() {
         matrix,
         store,
         10,
+        true,
     );
 
     // poll() should run without error, hitting mock endpoints + mock demo section

@@ -174,6 +174,7 @@ async fn test_initial_sync_registers_backfill_when_limit_is_reached() {
         matrix,
         store.clone(),
         5, // sync_limit is 5
+        true,
     );
 
     poller.sync_emails().await.unwrap();
@@ -256,6 +257,7 @@ async fn test_initial_sync_does_not_register_backfill_when_below_limit() {
         matrix,
         store.clone(),
         5, // sync_limit is 5
+        true,
     );
 
     poller.sync_emails().await.unwrap();
@@ -367,6 +369,7 @@ async fn test_backfill_batch_progresses_and_completes() {
         matrix,
         store.clone(),
         5, // sync_limit is 5
+        true,
     );
 
     // Run first backfill batch

@@ -18,6 +18,10 @@ pub struct JmapPoller {
     pub(crate) store: Store,
     pub(crate) matrix_user_id: String,
     pub(crate) sync_limit: usize,
+    /// When false, JMAP mailboxes (Inbox/Sent/Drafts/…) are not mirrored as
+    /// their own Matrix rooms — email content lives in per-contact rooms, so
+    /// those rooms are just clutter.
+    pub(crate) bridge_mailboxes: bool,
 }
 
 impl std::fmt::Debug for JmapPoller {
@@ -39,6 +43,7 @@ impl JmapPoller {
         matrix: MatrixClient,
         store: Store,
         sync_limit: usize,
+        bridge_mailboxes: bool,
     ) -> Self {
         Self {
             client,
@@ -46,6 +51,7 @@ impl JmapPoller {
             store,
             matrix_user_id,
             sync_limit,
+            bridge_mailboxes,
         }
     }
 
@@ -53,7 +59,9 @@ impl JmapPoller {
     pub async fn poll(&self) -> Result<()> {
         tracing::info!(user = %self.matrix_user_id, "Starting JMAP poll");
 
-        self.sync_mailboxes().await.context("Mailbox sync failed")?;
+        if self.bridge_mailboxes {
+            self.sync_mailboxes().await.context("Mailbox sync failed")?;
+        }
         self.sync_emails().await.context("Email sync failed")?;
 
         Ok(())

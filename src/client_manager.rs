@@ -34,6 +34,7 @@ pub struct ClientManager {
     /// Map of Matrix User ID → [`JoinHandle`] for their background event loop.
     poller_handles: RwLock<HashMap<String, JoinHandle<()>>>,
     pub(crate) sync_limit: usize,
+    pub(crate) bridge_mailboxes: bool,
 }
 
 impl std::fmt::Debug for ClientManager {
@@ -56,7 +57,16 @@ impl ClientManager {
             clients: RwLock::new(HashMap::new()),
             poller_handles: RwLock::new(HashMap::new()),
             sync_limit,
+            bridge_mailboxes: false,
         }
+    }
+
+    /// Enable mirroring JMAP mailboxes (Inbox/Sent/…) as their own Matrix rooms.
+    /// Off by default — email content lives in per-contact/per-thread rooms.
+    #[must_use]
+    pub const fn with_bridge_mailboxes(mut self, enabled: bool) -> Self {
+        self.bridge_mailboxes = enabled;
+        self
     }
 
     /// Load all registered users and start their sync sessions.
@@ -230,6 +240,7 @@ impl ClientManager {
             self.matrix.clone(),
             self.store.clone(),
             self.sync_limit,
+            self.bridge_mailboxes,
         );
 
         self.clients

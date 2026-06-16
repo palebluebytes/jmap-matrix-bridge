@@ -137,6 +137,7 @@ async fn test_poll_hits_jmap_and_matrix_endpoints() {
         matrix,
         store.clone(),
         10,
+        true,
     );
 
     // poll() should run without error, hitting JMAP endpoints and the mock demo section
@@ -269,6 +270,7 @@ async fn test_poll_respects_sync_limit() {
         matrix,
         store.clone(),
         5,
+        true,
     );
 
     let result = poller.poll().await;
@@ -447,6 +449,7 @@ async fn test_poll_handles_html_email() {
         matrix,
         store.clone(),
         10,
+        true,
     );
 
     let result = poller.poll().await;
@@ -662,6 +665,7 @@ async fn test_poll_handles_attachments() {
         matrix,
         store.clone(),
         10,
+        true,
     );
 
     let result = poller.poll().await;

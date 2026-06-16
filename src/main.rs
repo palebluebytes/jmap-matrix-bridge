@@ -66,6 +66,11 @@ enum Commands {
         #[arg(long, env = "JMAP_SYNC_LIMIT", default_value = "10")]
         jmap_sync_limit: usize,
 
+        /// Mirror JMAP mailboxes (Inbox/Sent/…) as their own Matrix rooms.
+        /// Off by default — email lives in per-contact/per-thread rooms.
+        #[arg(long, env = "BRIDGE_MAILBOXES", default_value = "false")]
+        bridge_mailboxes: bool,
+
         /// Matrix Homeserver URL
         #[arg(long, env = "MATRIX_URL")]
         matrix_url: String,
@@ -210,6 +215,7 @@ async fn main() -> anyhow::Result<()> {
             jmap_token,
             jmap_url,
             jmap_sync_limit,
+            bridge_mailboxes,
             matrix_url,
             matrix_as_token,
             matrix_hs_token,
@@ -273,11 +279,10 @@ async fn main() -> anyhow::Result<()> {
             let state_store = Arc::new(jmap_matrix_bridge::state::StateStore::new());
             let matrix =
                 matrix::MatrixClient::new(&matrix_url, &matrix_as_token, &matrix_domain).await?;
-            let client_manager = Arc::new(client_manager::ClientManager::new(
-                store.clone(),
-                matrix.clone(),
-                jmap_sync_limit,
-            ));
+            let client_manager = Arc::new(
+                client_manager::ClientManager::new(store.clone(), matrix.clone(), jmap_sync_limit)
+                    .with_bridge_mailboxes(bridge_mailboxes),
+            );
 
             // Register bot user to ensure it exists in Conduit
             let mut attempts = 0;

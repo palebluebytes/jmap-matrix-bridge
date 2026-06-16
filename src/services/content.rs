@@ -26,21 +26,28 @@ impl EmailBody {
 
         // Prefer a genuine text/plain body. JMAP's textBody points at the HTML
         // part when an email has no plain alternative, so guard on the part's
-        // content type — otherwise raw HTML is shown verbatim in the timeline.
+        // content type. Also bail to the HTML path if the "plain" part actually
+        // contains HTML markup — some senders embed HTML islands (`<ol>`,
+        // `<blockquote>`, `<figure>`) in their text/plain alternative, which
+        // would otherwise be shown as literal tags in the timeline.
         if let Some((mut plain, is_truncated, content_type)) = email
             .text_body()
             .and_then(|parts| Self::extract_body(email, parts))
             && content_type.as_deref() != Some("text/html")
+            && !looks_like_html(&plain)
         {
             if is_truncated {
                 plain.push_str("\n\n[Email truncated by server due to size limit]");
             }
-            return Self { plain, html: None };
+            return Self {
+                plain: normalize_plain(&plain),
+                html: None,
+            };
         }
 
         // HTML body — either from htmlBody, or a textBody that was actually
-        // text/html. Convert to text for the timeline and keep the HTML as the
-        // formatted body for clients that render it.
+        // text/html (or plain-with-HTML). Convert to text for the timeline and
+        // keep a sanitized copy of the HTML as the formatted body.
         if let Some((mut html, is_truncated, _)) = email
             .html_body()
             .and_then(|parts| Self::extract_body(email, parts))
@@ -55,10 +62,12 @@ impl EmailBody {
                     "<br><br><strong>[Email truncated by server due to size limit]</strong>",
                 );
             }
-            let plain = html2text::from_read(html.as_bytes(), 80).unwrap_or_else(|_| html.clone());
+            let plain = normalize_plain(
+                &html2text::from_read(html.as_bytes(), 80).unwrap_or_else(|_| html.clone()),
+            );
             return Self {
                 plain,
-                html: Some(html),
+                html: Some(clean_html_for_matrix(&html)),
             };
         }
 
@@ -67,6 +76,7 @@ impl EmailBody {
             html: None,
         }
     }
+
 
     fn extract_body(email: &Email, parts: &[EmailBodyPart]) -> Option<(String, bool, Option<String>)> {
         let part = parts.first()?;
@@ -77,6 +87,105 @@ impl EmailBody {
             .map(|v| (v.value().to_owned(), v.is_truncated(), content_type))
     }
 }
+
+/// Heuristic: does this text contain real HTML markup (a recognizable tag)?
+/// Deliberately conservative so plain prose with a stray `<` or `<3` is not
+/// misclassified.
+#[must_use]
+fn looks_like_html(s: &str) -> bool {
+    const TAGS: &[&str] = &[
+        "<div", "<p>", "<p ", "<br", "<a ", "<a>", "<table", "<td", "<tr", "<span", "<img",
+        "<ul", "<ol", "<li", "<blockquote", "<figure", "<h1", "<h2", "<h3", "<h4", "<strong",
+        "<em>", "<b>", "<i>", "<html", "<body", "<head", "<style", "<font", "<center",
+    ];
+    let bytes = s.as_bytes();
+    TAGS.iter()
+        .any(|t| find_ci(bytes, t.as_bytes(), 0).is_some())
+}
+
+/// ASCII-case-insensitive substring search returning the byte offset in
+/// `haystack` (offsets land on char boundaries because matches start only at
+/// ASCII bytes).
+fn find_ci(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() || from > haystack.len() - needle.len() {
+        return None;
+    }
+    (from..=haystack.len() - needle.len())
+        .find(|&i| haystack[i..i + needle.len()].eq_ignore_ascii_case(needle))
+}
+
+/// Remove every `open..close` region (case-insensitive on the ASCII delimiters).
+/// If an `open` has no matching `close`, the remainder is dropped.
+fn strip_region(s: &str, open: &str, close: &str) -> String {
+    let bytes = s.as_bytes();
+    let (ob, cb) = (open.as_bytes(), close.as_bytes());
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let Some(start) = find_ci(bytes, ob, i) else {
+            out.push_str(&s[i..]);
+            break;
+        };
+        out.push_str(&s[i..start]);
+        let Some(end) = find_ci(bytes, cb, start + ob.len()) else {
+            break; // unterminated region: drop the rest
+        };
+        i = end + cb.len();
+    }
+    out
+}
+
+/// Reduce a full HTML email document to body content suitable for a Matrix
+/// `formatted_body`: drop comments, `<head>`, `<style>`, `<script>`, the
+/// doctype, and unwrap `<body>`. Matrix clients sanitize the rest on render, so
+/// this just removes the bulk/clutter rather than enforcing the tag allowlist.
+#[must_use]
+fn clean_html_for_matrix(html: &str) -> String {
+    let mut s = strip_region(html, "<!--", "-->");
+    s = strip_region(&s, "<head", "</head>");
+    s = strip_region(&s, "<style", "</style>");
+    s = strip_region(&s, "<script", "</script>");
+    s = strip_region(&s, "<!doctype", ">");
+
+    // Unwrap to the inner content of <body> … </body> if present.
+    let bytes = s.as_bytes();
+    if let Some(open) = find_ci(bytes, b"<body", 0)
+        && let Some(gt) = s[open..].find('>')
+        && let Some(close) = find_ci(bytes, b"</body>", open)
+    {
+        let inner_start = open + gt + 1;
+        if inner_start <= close {
+            s = s[inner_start..close].to_owned();
+        }
+    }
+    s.trim().to_owned()
+}
+
+/// Tidy converted plain text: drop invisible padding characters (soft hyphen,
+/// zero-width space, BOM) that marketing emails use as preheader spacers, and
+/// collapse 3+ blank lines.
+#[must_use]
+fn normalize_plain(s: &str) -> String {
+    let filtered: String = s
+        .chars()
+        .filter(|&c| c != '\u{00AD}' && c != '\u{200B}' && c != '\u{FEFF}')
+        .collect();
+    let mut out = String::with_capacity(filtered.len());
+    let mut newlines = 0u32;
+    for c in filtered.chars() {
+        if c == '\n' {
+            newlines += 1;
+            if newlines <= 2 {
+                out.push(c);
+            }
+        } else {
+            newlines = 0;
+            out.push(c);
+        }
+    }
+    out.trim().to_owned()
+}
+
 
 /// Bridge JMAP attachments to Matrix media repository and send them in the room.
 #[allow(clippy::too_many_arguments)]
@@ -165,7 +274,7 @@ async fn bridge_attachment(
 ) -> Result<String> {
     let blob_id = part.blob_id().context("No blobId")?;
     let mime_type = part.content_type().unwrap_or("application/octet-stream");
-    let file_name = part.name().unwrap_or("attachment");
+    let file_name = part.name().unwrap_or("📎 attachment");
 
     let url = download_template
         .replace("{accountId}", account_id)
@@ -265,9 +374,17 @@ mod tests {
             "rendered text should contain the message: {}",
             body.plain
         );
+        // formatted_body is the sanitized body inner — no doctype/head/style.
+        let html = body.html.as_deref().expect("html formatted body present");
         assert!(
-            body.html.as_deref().is_some_and(|h| h.contains("<body>")),
-            "the HTML should be kept as the formatted body"
+            html.contains("<p>Hello") && html.contains("<b>world</b>"),
+            "formatted body should keep the rendered content: {html}"
+        );
+        assert!(
+            !html.contains("<!DOCTYPE")
+                && !html.to_lowercase().contains("<head")
+                && !html.to_lowercase().contains("<style"),
+            "formatted body should be stripped of doctype/head/style: {html}"
         );
     }
 
@@ -284,5 +401,57 @@ mod tests {
         let body = EmailBody::from_email(&email);
         assert_eq!(body.plain, "Just plain text");
         assert!(body.html.is_none());
+    }
+
+    #[test]
+    fn text_plain_part_with_html_islands_is_converted() {
+        // Some senders (e.g. Buttondown) put HTML inside their text/plain
+        // alternative. It must be converted, not shown as literal tags, and a
+        // formatted_body produced.
+        let email = email_from_json(serde_json::json!({
+            "id": "e3",
+            "threadId": "t3",
+            "textBody": [{ "partId": "1", "type": "text/plain" }],
+            "bodyValues": {
+                "1": {
+                    "value": "Intro line\n<ol><li>first</li><li>second</li></ol>\n<blockquote>quote</blockquote>",
+                    "isTruncated": false
+                }
+            }
+        }));
+        let body = EmailBody::from_email(&email);
+        assert!(
+            !body.plain.contains("<ol>") && !body.plain.contains("<blockquote>"),
+            "html islands must not survive as raw tags: {}",
+            body.plain
+        );
+        assert!(body.html.is_some(), "a formatted body should be produced");
+    }
+
+    #[test]
+    fn looks_like_html_detection() {
+        use super::looks_like_html;
+        assert!(looks_like_html("<ol><li>x</li></ol>"));
+        assert!(looks_like_html("hi <blockquote>q</blockquote>"));
+        assert!(looks_like_html("see <a href=\"x\">link</a>"));
+        assert!(!looks_like_html("just normal prose, nothing here"));
+        assert!(!looks_like_html("i <3 you and a < b"));
+    }
+
+    #[test]
+    fn clean_html_strips_chrome_and_unwraps_body() {
+        use super::clean_html_for_matrix;
+        let dirty = "<!DOCTYPE html><html><head><style>/* css */</style></head>\
+                     <body><!-- hi --><p>Hello <b>world</b></p></body></html>";
+        let clean = clean_html_for_matrix(dirty);
+        assert_eq!(clean, "<p>Hello <b>world</b></p>");
+    }
+
+    #[test]
+    fn normalize_plain_strips_invisible_padding_and_blank_runs() {
+        use super::normalize_plain;
+        // soft hyphen + zero-width space padding, and 4 blank lines.
+        let input = "Hi\u{00AD}\u{200B}there\n\n\n\n\nbye";
+        assert_eq!(normalize_plain(input), "Hithere\n\nbye");
     }
 }
