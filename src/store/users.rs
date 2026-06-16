@@ -14,8 +14,20 @@ impl Store {
         } else {
             (user.jmap_username.clone(), user.jmap_token.clone())
         };
+        // Upsert in place. `INSERT OR REPLACE` would DELETE the existing row
+        // before re-inserting, which fires the `ON DELETE CASCADE` on every
+        // child table keyed by `matrix_user_id` (room_ghost_mapping, jmap_state,
+        // user_signatures) — silently wiping all of a user's room↔email bindings
+        // every time the user is re-saved (which declarative provisioning does on
+        // every startup). `ON CONFLICT DO UPDATE` mutates the row in place, so no
+        // delete and no cascade.
         sqlx::query(
-            "INSERT OR REPLACE INTO users (matrix_user_id, jmap_username, jmap_token, jmap_url) VALUES (?, ?, ?, ?)"
+            "INSERT INTO users (matrix_user_id, jmap_username, jmap_token, jmap_url) \
+             VALUES (?, ?, ?, ?) \
+             ON CONFLICT(matrix_user_id) DO UPDATE SET \
+                 jmap_username = excluded.jmap_username, \
+                 jmap_token = excluded.jmap_token, \
+                 jmap_url = excluded.jmap_url"
         )
         .bind(&user.matrix_user_id)
         .bind(&username)

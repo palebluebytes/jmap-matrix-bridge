@@ -180,6 +180,55 @@ mod tests {
         assert_eq!(bob, Some("s2".to_string()));
     }
 
+    /// Regression: re-saving a user (which declarative provisioning does on
+    /// every startup) must NOT wipe that user's room↔email bindings or kv state.
+    /// `INSERT OR REPLACE INTO users` deleted the row before re-inserting, firing
+    /// `ON DELETE CASCADE` on `room_ghost_mapping`/`jmap_state` and silently
+    /// destroying every binding — so outbound replies in existing rooms became
+    /// silent no-ops. The fix upserts in place (`ON CONFLICT DO UPDATE`).
+    #[tokio::test]
+    async fn test_resaving_user_preserves_child_rows() {
+        let store = Store::new_in_memory(None).await.unwrap();
+        let user = RegisteredUser {
+            matrix_user_id: "@alice:localhost".to_string(),
+            jmap_username: "alice".to_string(),
+            jmap_token: "secret".to_string(),
+            jmap_url: "http://localhost".to_string(),
+        };
+        store.save_user(&user).await.unwrap();
+        store
+            .save_room_ghost_mapping("!room:localhost", "bob@example.com", "@alice:localhost")
+            .await
+            .unwrap();
+        store
+            .save_jmap_state("@alice:localhost", "backfill_position", "42")
+            .await
+            .unwrap();
+
+        // Re-provision the identical user, exactly like a service restart does.
+        store.save_user(&user).await.unwrap();
+
+        // The bindings and kv state must survive the re-save.
+        assert_eq!(
+            store
+                .get_ghost_email_by_room("!room:localhost")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("bob@example.com"),
+            "room_ghost_mapping was cascade-wiped by re-saving the user"
+        );
+        assert_eq!(
+            store
+                .get_jmap_state("@alice:localhost", "backfill_position")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("42"),
+            "jmap_state was cascade-wiped by re-saving the user"
+        );
+    }
+
     #[tokio::test]
     async fn test_jmap_state_empty_user_id() {
         let store = Store::new_in_memory(None).await.unwrap();
