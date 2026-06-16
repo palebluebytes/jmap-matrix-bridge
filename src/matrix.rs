@@ -88,52 +88,57 @@ impl MatrixClient {
         format!("@_jmap_bot:{}", self.domain)
     }
 
-    /// Build a `/rooms/{room_id}/state/m.room.name/` URL with each path segment
-    /// percent-encoded (room ids contain `!` and `:`).
-    fn room_name_state_url(&self, room_id: &str) -> Result<reqwest::Url> {
+    /// Build a `/rooms/{room_id}/state/{event_type}/{state_key}` URL with each
+    /// path segment percent-encoded (room ids contain `!` and `:`).
+    fn state_url(&self, room_id: &str, event_type: &str, state_key: &str) -> Result<reqwest::Url> {
         let mut url = reqwest::Url::parse(&self.homeserver_url)?;
         url.path_segments_mut()
             .map_err(|()| anyhow::anyhow!("homeserver URL cannot be a base"))?
             .extend(&[
-                "_matrix",
-                "client",
-                "v3",
-                "rooms",
-                room_id,
-                "state",
-                "m.room.name",
-                "",
+                "_matrix", "client", "v3", "rooms", room_id, "state", event_type, state_key,
             ]);
         Ok(url)
     }
 
-    /// Set a room's name via the state API, acting as the bridge bot (the room
-    /// creator, so it has the power level to do so). Used by `!compose` to label
-    /// a freshly-opened conversation with the user's chosen subject.
+    /// PUT a state event into a room, acting as the bridge bot (the room creator,
+    /// so it has the power level to do so).
     ///
-    /// Done over raw HTTP rather than `matrix_sdk`'s cached `Room::set_name`
-    /// because the appservice runs no `/sync`, so the SDK has no room state.
-    pub async fn set_room_name(&self, room_id: &str, name: &str) -> Result<()> {
-        let url = self.room_name_state_url(room_id)?;
+    /// Done over raw HTTP rather than `matrix_sdk`'s cached room state because
+    /// the appservice runs no `/sync`, so the SDK has no room state.
+    async fn put_state(
+        &self,
+        room_id: &str,
+        event_type: &str,
+        state_key: &str,
+        body: &serde_json::Value,
+    ) -> Result<()> {
+        let url = self.state_url(room_id, event_type, state_key)?;
         let resp = self
             .http_client
             .put(url)
             .bearer_auth(&self.as_token)
-            .json(&serde_json::json!({ "name": name }))
+            .json(body)
             .send()
             .await?;
         anyhow::ensure!(
             resp.status().is_success(),
-            "set_room_name failed: {}",
+            "PUT {event_type} state failed: {}",
             resp.status()
         );
         Ok(())
     }
 
+    /// Set a room's name. Used by `!compose` to label a freshly-opened
+    /// conversation with the user's chosen subject.
+    pub async fn set_room_name(&self, room_id: &str, name: &str) -> Result<()> {
+        self.put_state(room_id, "m.room.name", "", &serde_json::json!({ "name": name }))
+            .await
+    }
+
     /// Best-effort read of a room's current name from the state API, or `None`
     /// if unset/unreadable. Used to pick the subject for a fresh outbound email.
     pub async fn room_name(&self, room_id: &str) -> Option<String> {
-        let url = self.room_name_state_url(room_id).ok()?;
+        let url = self.state_url(room_id, "m.room.name", "").ok()?;
         let resp = self
             .http_client
             .get(url)
@@ -149,6 +154,52 @@ impl MatrixClient {
             .and_then(serde_json::Value::as_str)
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
+    }
+
+    /// Create a private Matrix space (a room with `type: m.space`), inviting the
+    /// real user. Created as the bot. Used to group all of a user's bridged
+    /// email conversation rooms under one parent.
+    pub async fn create_space(
+        &self,
+        name: &str,
+        topic: &str,
+        invite_user_id: &str,
+    ) -> Result<String> {
+        info!("Creating email space: {name}");
+        let mut request = CreateRoomRequest::new();
+        request.name = Some(name.to_owned());
+        request.topic = Some(topic.to_owned());
+        request.preset = Some(RoomPreset::PrivateChat);
+        request.invite = vec![UserId::parse(invite_user_id)?];
+        request.is_direct = false;
+        request.creation_content = Some(matrix_sdk::ruma::serde::Raw::from_json_string(
+            serde_json::json!({ "type": "m.space" }).to_string(),
+        )?);
+
+        let bot_id = UserId::parse(self.bot_user_id())?;
+        let resp = self.send_as_ghost(request, &bot_id, None).await?;
+        Ok(resp.room_id.to_string())
+    }
+
+    /// Link `child_room_id` into `space_id` as a child (and back-reference the
+    /// space from the child), so the contact room shows up inside the space.
+    /// Both state events are written as the bot.
+    pub async fn add_room_to_space(&self, space_id: &str, child_room_id: &str) -> Result<()> {
+        let via = serde_json::json!([self.domain]);
+        self.put_state(
+            space_id,
+            "m.space.child",
+            child_room_id,
+            &serde_json::json!({ "via": via, "suggested": true }),
+        )
+        .await?;
+        self.put_state(
+            child_room_id,
+            "m.space.parent",
+            space_id,
+            &serde_json::json!({ "via": via, "canonical": true }),
+        )
+        .await
     }
 
     /// A unique transaction ID safe for use in Matrix PUT requests.

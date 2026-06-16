@@ -83,7 +83,88 @@ pub async fn ensure_contact_room(
         .save_room_ghost_mapping(&room_id, email, matrix_user_id)
         .await?;
     let _ = matrix.join_room_as(&room_id, &ghost_user_id).await;
+
+    // Group the new conversation under the user's "email <address>" space.
+    // Best-effort: a space failure must not fail room provisioning.
+    if let Err(e) = ensure_room_in_email_space(matrix, store, matrix_user_id, &room_id).await {
+        warn!(error = %e, "Failed to add contact room to email space");
+    }
     Ok(room_id)
+}
+
+/// Ensure the user's email space exists and that `room_id` is a child of it.
+async fn ensure_room_in_email_space(
+    matrix: &MatrixClient,
+    store: &Store,
+    matrix_user_id: &str,
+    room_id: &str,
+) -> Result<()> {
+    let space_id = ensure_email_space(matrix, store, matrix_user_id).await?;
+    matrix.add_room_to_space(&space_id, room_id).await
+}
+
+/// Return the user's email space room id, creating it on first use. Guarded by a
+/// creation lock so two concurrent room provisions can't make two spaces.
+async fn ensure_email_space(
+    matrix: &MatrixClient,
+    store: &Store,
+    matrix_user_id: &str,
+) -> Result<String> {
+    let lock_key = format!("email_space:{matrix_user_id}");
+    loop {
+        if let Some(space) = store.get_email_space_room(matrix_user_id).await? {
+            return Ok(space);
+        }
+        if store.try_acquire_room_creation_lock(&lock_key).await? {
+            // Release the lock however we leave this block.
+            let store_clone = store.clone();
+            let lock_key_clone = lock_key.clone();
+            let _guard = scopeguard::guard((), move |()| {
+                tokio::spawn(async move {
+                    let _ = store_clone.release_room_creation_lock(&lock_key_clone).await;
+                });
+            });
+            // Another trigger may have created it while we waited for the lock.
+            if let Some(space) = store.get_email_space_room(matrix_user_id).await? {
+                return Ok(space);
+            }
+            let space = create_email_space(matrix, store, matrix_user_id).await?;
+            store.set_email_space_room(matrix_user_id, &space).await?;
+            return Ok(space);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+async fn create_email_space(
+    matrix: &MatrixClient,
+    store: &Store,
+    matrix_user_id: &str,
+) -> Result<String> {
+    let label = store
+        .get_user_email(matrix_user_id)
+        .await?
+        .unwrap_or_else(|| user_label(matrix_user_id));
+    let name = format!("email {label}");
+    let topic = format!(
+        "Bridged email for {label}. Every room in this space is one email conversation, \
+         mirrored to and from your mailbox by the JMAP bridge. Reply in a room to answer by \
+         email, or use !compose <address> to start a new one."
+    );
+    let space = matrix.create_space(&name, &topic, matrix_user_id).await?;
+    info!("Created email space {space} ({name}) for {matrix_user_id}");
+    Ok(space)
+}
+
+/// Fallback label when the user's email address isn't known yet: the localpart
+/// of their Matrix id.
+fn user_label(matrix_user_id: &str) -> String {
+    matrix_user_id
+        .trim_start_matches('@')
+        .split(':')
+        .next()
+        .unwrap_or(matrix_user_id)
+        .to_owned()
 }
 
 /// Handle a message sent by a Matrix user to a ghost room.

@@ -78,6 +78,29 @@ impl Store {
     }
 
     /// Store a user's Matrix double-puppet access token, encrypted at rest if a
+    /// Store the user's own primary email address (from their JMAP identity),
+    /// used to label their email space. Plaintext in the kv table.
+    pub async fn set_user_email(&self, matrix_user_id: &str, email: &str) -> Result<()> {
+        self.save_jmap_state(matrix_user_id, "user_email", email).await
+    }
+
+    /// Read the user's own primary email address, if known.
+    pub async fn get_user_email(&self, matrix_user_id: &str) -> Result<Option<String>> {
+        self.get_jmap_state(matrix_user_id, "user_email").await
+    }
+
+    /// Store the room id of the user's "email" space — the parent that collects
+    /// all their bridged conversation rooms. Created lazily on first room.
+    pub async fn set_email_space_room(&self, matrix_user_id: &str, room_id: &str) -> Result<()> {
+        self.save_jmap_state(matrix_user_id, "email_space_room", room_id)
+            .await
+    }
+
+    /// Read the user's email space room id, if it has been created.
+    pub async fn get_email_space_room(&self, matrix_user_id: &str) -> Result<Option<String>> {
+        self.get_jmap_state(matrix_user_id, "email_space_room").await
+    }
+
     /// key is configured. Reuses the generic state kv table so no schema change
     /// is needed. The user row must already exist (FK on `jmap_state`).
     pub async fn set_matrix_puppet_token(&self, matrix_user_id: &str, token: &str) -> Result<()> {

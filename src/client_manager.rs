@@ -142,10 +142,41 @@ impl ClientManager {
             .await?;
         self.store.save_user(&user).await?;
 
+        // Cache the user's own email address (from their JMAP identity) so the
+        // email space can be labelled with it. Best-effort — a failure here must
+        // not block the session.
+        if let Some(email) = Self::fetch_primary_email(&client).await {
+            if let Err(e) = self.store.set_user_email(&matrix_user_id, &email).await {
+                tracing::warn!(error = %e, "Failed to store primary email for {matrix_user_id}");
+            }
+        } else {
+            tracing::warn!("Could not determine primary email for {matrix_user_id}");
+        }
+
         // Abort any existing poller and start a fresh session.
         self.abort_poller(&matrix_user_id).await;
         self.start_session(user, Arc::new(client)).await;
         Ok(())
+    }
+
+    /// Fetch the first email address from the account's JMAP identities, used to
+    /// label the user's email space. Returns `None` if the server exposes no
+    /// identity with an email (e.g. some admin accounts).
+    async fn fetch_primary_email(client: &Client) -> Option<String> {
+        let mut request = client.build();
+        request.get_identity();
+        let response = request
+            .send()
+            .await
+            .ok()?
+            .pop_method_response()?
+            .unwrap_get_identity()
+            .ok()?;
+        response
+            .list()
+            .iter()
+            .find_map(|identity| identity.email())
+            .map(str::to_owned)
     }
 
     /// Look up the JMAP client for `matrix_user_id` (for sending operations).
