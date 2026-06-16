@@ -98,6 +98,25 @@ in
       '';
     };
 
+    renderMode = lib.mkOption {
+      type = lib.types.enum [
+        "plain"
+        "links"
+        "rich"
+      ];
+      default = "links";
+      description = ''
+        How email bodies are rendered into Matrix messages:
+
+        - `plain`: plain text only; links are bare URLs, no buttons.
+        - `links` (default): plain text plus a lightweight formatted body that
+          keeps clickable links (email buttons become links) but drops images,
+          layout and styling.
+        - `rich`: plain text plus the full cleaned HTML (images, formatting) —
+          closest to the email's real layout, but busier.
+      '';
+    };
+
     users = lib.mkOption {
       default = [ ];
       description = ''
@@ -198,6 +217,7 @@ in
         JMAP_URL = cfg.url;
         MATRIX_URL = cfg.matrixUrl;
         BRIDGE_MAILBOXES = lib.boolToString cfg.bridgeMailboxes;
+        RENDER_MODE = cfg.renderMode;
       };
 
       serviceConfig = {

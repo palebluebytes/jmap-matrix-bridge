@@ -16,6 +16,7 @@ use jmap_client::client::Client;
 
 use crate::ingest::JmapPoller;
 use crate::matrix::MatrixClient;
+use crate::services::content::RenderMode;
 use crate::store::{RegisteredUser, Store};
 
 // ─── ClientManager ────────────────────────────────────────────────────────────
@@ -35,6 +36,7 @@ pub struct ClientManager {
     poller_handles: RwLock<HashMap<String, JoinHandle<()>>>,
     pub(crate) sync_limit: usize,
     pub(crate) bridge_mailboxes: bool,
+    pub(crate) render_mode: RenderMode,
 }
 
 impl std::fmt::Debug for ClientManager {
@@ -58,6 +60,7 @@ impl ClientManager {
             poller_handles: RwLock::new(HashMap::new()),
             sync_limit,
             bridge_mailboxes: false,
+            render_mode: RenderMode::default(),
         }
     }
 
@@ -66,6 +69,13 @@ impl ClientManager {
     #[must_use]
     pub const fn with_bridge_mailboxes(mut self, enabled: bool) -> Self {
         self.bridge_mailboxes = enabled;
+        self
+    }
+
+    /// Set how email bodies are rendered into Matrix messages (plain/links/rich).
+    #[must_use]
+    pub const fn with_render_mode(mut self, mode: RenderMode) -> Self {
+        self.render_mode = mode;
         self
     }
 
@@ -241,6 +251,7 @@ impl ClientManager {
             self.store.clone(),
             self.sync_limit,
             self.bridge_mailboxes,
+            self.render_mode,
         );
 
         self.clients

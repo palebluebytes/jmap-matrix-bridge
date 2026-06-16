@@ -5,6 +5,7 @@ pub mod email;
 pub mod mailbox;
 
 use crate::matrix::MatrixClient;
+use crate::services::content::RenderMode;
 use crate::store::Store;
 use anyhow::{Context, Result};
 use jmap_client::client::Client;
@@ -22,6 +23,8 @@ pub struct JmapPoller {
     /// their own Matrix rooms — email content lives in per-contact rooms, so
     /// those rooms are just clutter.
     pub(crate) bridge_mailboxes: bool,
+    /// How email bodies are rendered into Matrix messages (plain / links / rich).
+    pub(crate) render_mode: RenderMode,
 }
 
 impl std::fmt::Debug for JmapPoller {
@@ -44,6 +47,7 @@ impl JmapPoller {
         store: Store,
         sync_limit: usize,
         bridge_mailboxes: bool,
+        render_mode: RenderMode,
     ) -> Self {
         Self {
             client,
@@ -52,6 +56,7 @@ impl JmapPoller {
             matrix_user_id,
             sync_limit,
             bridge_mailboxes,
+            render_mode,
         }
     }
 

@@ -71,6 +71,12 @@ enum Commands {
         #[arg(long, env = "BRIDGE_MAILBOXES", default_value = "false")]
         bridge_mailboxes: bool,
 
+        /// How email bodies render into Matrix messages: `plain` (text only),
+        /// `links` (text + clickable links, no images/layout), or `rich`
+        /// (full cleaned HTML).
+        #[arg(long, env = "RENDER_MODE", default_value = "links")]
+        render_mode: String,
+
         /// Matrix Homeserver URL
         #[arg(long, env = "MATRIX_URL")]
         matrix_url: String,
@@ -197,7 +203,15 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&cli.log_level));
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&cli.log_level))
+        // html5ever (pulled in by html2text) emits a noisy "foster parenting not
+        // implemented" WARN for every messy marketing-HTML table it converts;
+        // silence it so it doesn't flood the journal.
+        .add_directive(
+            "html5ever=error"
+                .parse()
+                .expect("static directive is valid"),
+        );
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     match cli.command {
@@ -216,6 +230,7 @@ async fn main() -> anyhow::Result<()> {
             jmap_url,
             jmap_sync_limit,
             bridge_mailboxes,
+            render_mode,
             matrix_url,
             matrix_as_token,
             matrix_hs_token,
@@ -226,6 +241,10 @@ async fn main() -> anyhow::Result<()> {
             users,
         } => {
             info!("Starting JMAP Bridge on port {} with db: {}", port, db);
+
+            let render_mode: jmap_matrix_bridge::services::content::RenderMode = render_mode
+                .parse()
+                .map_err(|e: String| anyhow::anyhow!(e))?;
 
             // Load key string from encryption_key argument or from the encryption_key_file path
             let key_str = if let Some(key) = encryption_key {
@@ -281,7 +300,8 @@ async fn main() -> anyhow::Result<()> {
                 matrix::MatrixClient::new(&matrix_url, &matrix_as_token, &matrix_domain).await?;
             let client_manager = Arc::new(
                 client_manager::ClientManager::new(store.clone(), matrix.clone(), jmap_sync_limit)
-                    .with_bridge_mailboxes(bridge_mailboxes),
+                    .with_bridge_mailboxes(bridge_mailboxes)
+                    .with_render_mode(render_mode),
             );
 
             // Register bot user to ensure it exists in Conduit

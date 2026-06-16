@@ -228,7 +228,7 @@ impl JmapPoller {
         );
 
         let ghost = self.resolve_ghost(email).await?;
-        let body = EmailBody::from_email(email);
+        let body = EmailBody::from_email(email, self.render_mode);
 
         if let Some((_root_event_id, room_id, _latest_event_id)) =
             self.store.get_thread_info(thread_id).await?

@@ -18,66 +18,119 @@ pub struct EmailBody {
     pub html: Option<String>,
 }
 
-impl EmailBody {
-    /// Extract the best available body from a JMAP Email.
-    #[must_use]
-    pub fn from_email(email: &Email) -> Self {
-        let subject = email.subject().unwrap_or(NO_SUBJECT);
+/// How an email's body is rendered into a Matrix message.
+///
+/// Element shows `formatted_body` (HTML) when present, otherwise the plain
+/// `body`. A clickable *named* link ("Confirm your subscription") therefore
+/// requires HTML — plain text can only auto-link bare URLs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RenderMode {
+    /// Plain text only; never emit a formatted body. Cleanest, but links are
+    /// just bare URLs and there are no buttons.
+    Plain,
+    /// Plain text plus a lightweight formatted body that keeps links (so
+    /// buttons become clickable links) and basic formatting, but drops images,
+    /// layout containers and styling. The default.
+    #[default]
+    Links,
+    /// Plain text plus the full cleaned HTML as the formatted body — closest to
+    /// the email's real layout (images, formatting), but busier.
+    Rich,
+}
 
-        // Prefer a genuine text/plain body. JMAP's textBody points at the HTML
-        // part when an email has no plain alternative, so guard on the part's
-        // content type. Also bail to the HTML path if the "plain" part actually
-        // contains HTML markup — some senders embed HTML islands (`<ol>`,
-        // `<blockquote>`, `<figure>`) in their text/plain alternative, which
-        // would otherwise be shown as literal tags in the timeline.
-        if let Some((plain, is_truncated, content_type)) = email
-            .text_body()
-            .and_then(|parts| Self::extract_body(email, parts))
-            && content_type.as_deref() != Some("text/html")
-            && !looks_like_html(&plain)
-        {
-            let mut body = strip_quoted_reply(&plain);
-            if is_truncated {
-                body.push_str("\n\n[Email truncated by server due to size limit]");
-            }
-            return Self {
-                plain: normalize_plain(&body),
-                html: None,
-            };
-        }
+impl std::str::FromStr for RenderMode {
+    type Err = String;
 
-        // HTML body — either from htmlBody, or a textBody that was actually
-        // text/html (or plain-with-HTML). Convert to text for the timeline and
-        // keep a sanitized copy of the HTML as the formatted body.
-        if let Some((mut html, is_truncated, _)) = email
-            .html_body()
-            .and_then(|parts| Self::extract_body(email, parts))
-            .or_else(|| {
-                email
-                    .text_body()
-                    .and_then(|parts| Self::extract_body(email, parts))
-            })
-        {
-            if is_truncated {
-                html.push_str(
-                    "<br><br><strong>[Email truncated by server due to size limit]</strong>",
-                );
-            }
-            let plain = normalize_plain(&strip_quoted_reply(
-                &html2text::from_read(html.as_bytes(), 80).unwrap_or_else(|_| html.clone()),
-            ));
-            return Self {
-                plain,
-                html: Some(clean_html_for_matrix(&html)),
-            };
-        }
-
-        Self {
-            plain: subject.to_owned(),
-            html: None,
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "plain" => Ok(Self::Plain),
+            "links" => Ok(Self::Links),
+            "rich" | "html" => Ok(Self::Rich),
+            other => Err(format!(
+                "unknown render mode {other:?} (expected plain, links or rich)"
+            )),
         }
     }
+}
 
+impl EmailBody {
+    /// Extract the best available body from a JMAP Email, rendered per `mode`.
+    #[must_use]
+    pub fn from_email(email: &Email, mode: RenderMode) -> Self {
+        let subject = email.subject().unwrap_or(NO_SUBJECT);
+        let plain_part = Self::plain_candidate(email);
+        let html_part = Self::html_candidate(email);
+
+        // Timeline plain text: prefer a genuine text/plain part; otherwise
+        // render the HTML to text; otherwise fall back to the subject.
+        let (raw, is_truncated) = if let Some((text, trunc)) = &plain_part {
+            (text.clone(), *trunc)
+        } else if let Some((html, trunc)) = &html_part {
+            (
+                html2text::from_read(html.as_bytes(), 80).unwrap_or_else(|_| html.clone()),
+                *trunc,
+            )
+        } else {
+            (subject.to_owned(), false)
+        };
+        let mut body = strip_quoted_reply(&raw);
+        if is_truncated {
+            body.push_str("\n\n[Email truncated by server due to size limit]");
+        }
+        let plain = normalize_plain(&body);
+
+        // Formatted body: only when the mode wants HTML and an HTML
+        // representation exists (htmlBody, or a textBody that was actually HTML).
+        let html = match mode {
+            RenderMode::Plain => None,
+            RenderMode::Links | RenderMode::Rich => html_part.map(|(mut html, trunc)| {
+                if trunc {
+                    html.push_str(
+                        "<br><br><strong>[Email truncated by server due to size limit]</strong>",
+                    );
+                }
+                match mode {
+                    RenderMode::Rich => clean_html_for_matrix(&html),
+                    _ => lightweight_html(&html),
+                }
+            }),
+        };
+
+        Self { plain, html }
+    }
+
+    /// A genuine `text/plain` body part (not HTML). JMAP's textBody points at
+    /// the HTML part when an email has no plain alternative, so guard on the
+    /// part's content type, and reject a "plain" part that actually contains
+    /// HTML markup (some senders embed `<ol>`/`<blockquote>`/`<figure>` islands).
+    fn plain_candidate(email: &Email) -> Option<(String, bool)> {
+        let (text, truncated, content_type) = email
+            .text_body()
+            .and_then(|parts| Self::extract_body(email, parts))?;
+        if content_type.as_deref() == Some("text/html") || looks_like_html(&text) {
+            return None;
+        }
+        Some((text, truncated))
+    }
+
+    /// The best HTML representation: `htmlBody`, or a `textBody` that was
+    /// actually `text/html` (or plain-with-HTML islands).
+    fn html_candidate(email: &Email) -> Option<(String, bool)> {
+        if let Some((html, truncated, _)) = email
+            .html_body()
+            .and_then(|parts| Self::extract_body(email, parts))
+        {
+            return Some((html, truncated));
+        }
+        let (text, truncated, content_type) = email
+            .text_body()
+            .and_then(|parts| Self::extract_body(email, parts))?;
+        if content_type.as_deref() == Some("text/html") || looks_like_html(&text) {
+            Some((text, truncated))
+        } else {
+            None
+        }
+    }
 
     fn extract_body(email: &Email, parts: &[EmailBodyPart]) -> Option<(String, bool, Option<String>)> {
         let part = parts.first()?;
@@ -174,6 +227,22 @@ fn clean_html_for_matrix(html: &str) -> String {
     for tag in [
         "table", "thead", "tbody", "tfoot", "colgroup", "col", "tr", "td", "th", "center",
     ] {
+        s = strip_region(&s, &format!("<{tag}"), ">");
+        s = strip_region(&s, &format!("</{tag}"), ">");
+    }
+    s.trim().to_owned()
+}
+
+/// Reduce an HTML email to a lightweight formatted body: keep text, links (so
+/// buttons become clickable links) and basic inline/list formatting, but drop
+/// images and layout containers. Builds on `clean_html_for_matrix` (which
+/// already removes chrome and quoted blocks and linearizes tables), then strips
+/// images and unwraps `<div>`/`<span>`/`<font>` so the content flows as text.
+#[must_use]
+fn lightweight_html(html: &str) -> String {
+    let mut s = clean_html_for_matrix(html);
+    s = strip_region(&s, "<img", ">"); // images dropped entirely
+    for tag in ["div", "span", "font"] {
         s = strip_region(&s, &format!("<{tag}"), ">");
         s = strip_region(&s, &format!("</{tag}"), ">");
     }
@@ -381,7 +450,7 @@ pub async fn append_user_signature(store: &Store, user_id: &str, body: &mut Stri
 
 #[cfg(test)]
 mod tests {
-    use super::EmailBody;
+    use super::{EmailBody, RenderMode};
     use jmap_client::email::Email;
 
     fn email_from_json(v: serde_json::Value) -> Email {
@@ -403,7 +472,7 @@ mod tests {
                 }
             }
         }));
-        let body = EmailBody::from_email(&email);
+        let body = EmailBody::from_email(&email, RenderMode::Rich);
         assert!(
             !body.plain.contains("<!DOCTYPE") && !body.plain.contains("<html"),
             "timeline body should be rendered text, not raw HTML: {}",
@@ -438,7 +507,7 @@ mod tests {
                 "1": { "value": "Just plain text", "isTruncated": false }
             }
         }));
-        let body = EmailBody::from_email(&email);
+        let body = EmailBody::from_email(&email, RenderMode::Links);
         assert_eq!(body.plain, "Just plain text");
         assert!(body.html.is_none());
     }
@@ -459,7 +528,7 @@ mod tests {
                 }
             }
         }));
-        let body = EmailBody::from_email(&email);
+        let body = EmailBody::from_email(&email, RenderMode::Links);
         assert!(
             !body.plain.contains("<ol>") && !body.plain.contains("<blockquote>"),
             "html islands must not survive as raw tags: {}",
@@ -541,7 +610,7 @@ mod tests {
                 }
             }
         }));
-        let body = EmailBody::from_email(&email);
+        let body = EmailBody::from_email(&email, RenderMode::Links);
         assert_eq!(body.plain, "09123");
         assert!(!body.plain.contains("> 5678") && !body.plain.contains("wrote:"));
     }
@@ -553,5 +622,74 @@ mod tests {
                      <blockquote type=\"cite\"><p>old quoted message</p></blockquote>";
         let clean = clean_html_for_matrix(dirty);
         assert_eq!(clean, "<p>my reply</p>");
+    }
+
+    #[test]
+    fn render_mode_parses() {
+        assert_eq!("plain".parse(), Ok(RenderMode::Plain));
+        assert_eq!("links".parse(), Ok(RenderMode::Links));
+        assert_eq!("rich".parse(), Ok(RenderMode::Rich));
+        assert_eq!("HTML".parse(), Ok(RenderMode::Rich));
+        assert_eq!(RenderMode::default(), RenderMode::Links);
+        assert!("nope".parse::<RenderMode>().is_err());
+    }
+
+    #[test]
+    fn lightweight_html_keeps_links_drops_images_and_layout() {
+        use super::lightweight_html;
+        // A Kit-style button: an <a> inside layout wrappers, plus an image.
+        let dirty = "<div class=\"box\"><img src=\"x.png\"/>\
+                     <a href=\"https://kit.com/confirm\">Confirm your subscription</a>\
+                     <span>extra</span></div>";
+        let out = lightweight_html(dirty);
+        assert!(
+            out.contains("<a href=\"https://kit.com/confirm\">Confirm your subscription</a>"),
+            "the link (button) must survive as a clickable link: {out}"
+        );
+        assert!(!out.contains("<img"), "images must be dropped: {out}");
+        assert!(
+            !out.contains("<div") && !out.contains("<span"),
+            "layout containers must be unwrapped: {out}"
+        );
+    }
+
+    fn link_email() -> Email {
+        // An email with a plain alternative and an HTML alternative carrying a link.
+        email_from_json(serde_json::json!({
+            "id": "e5",
+            "threadId": "t5",
+            "textBody": [{ "partId": "1", "type": "text/plain" }],
+            "htmlBody": [{ "partId": "2", "type": "text/html" }],
+            "bodyValues": {
+                "1": { "value": "Confirm your subscription ( https://kit.com/confirm )", "isTruncated": false },
+                "2": { "value": "<div><img src=\"x.png\"/><a href=\"https://kit.com/confirm\">Confirm your subscription</a></div>", "isTruncated": false }
+            }
+        }))
+    }
+
+    #[test]
+    fn links_mode_emits_clickable_link_without_images() {
+        let body = EmailBody::from_email(&link_email(), RenderMode::Links);
+        let html = body.html.as_deref().expect("links mode emits a formatted body");
+        assert!(html.contains("href=\"https://kit.com/confirm\""), "{html}");
+        assert!(!html.contains("<img"), "links mode drops images: {html}");
+    }
+
+    #[test]
+    fn rich_mode_keeps_full_html_including_images() {
+        let body = EmailBody::from_email(&link_email(), RenderMode::Rich);
+        let html = body.html.as_deref().expect("rich mode emits a formatted body");
+        assert!(html.contains("<img"), "rich mode keeps images: {html}");
+    }
+
+    #[test]
+    fn plain_mode_emits_no_formatted_body() {
+        let body = EmailBody::from_email(&link_email(), RenderMode::Plain);
+        assert!(
+            body.html.is_none(),
+            "plain mode never emits a formatted body"
+        );
+        // The timeline text still comes through.
+        assert!(body.plain.contains("Confirm your subscription"));
     }
 }
