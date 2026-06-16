@@ -114,11 +114,17 @@ impl EmailBody {
     }
 
     /// The best HTML representation: `htmlBody`, or a `textBody` that was
-    /// actually `text/html` (or plain-with-HTML islands).
+    /// actually `text/html` (or plain-with-HTML islands). Returns `None` for a
+    /// plain-text-only email — JMAP points `htmlBody` at the `text/plain` part
+    /// when there is no HTML alternative (symmetric to `textBody` pointing at
+    /// HTML), so guard on the part's content type in BOTH branches; otherwise
+    /// plain text would be emitted verbatim as a bogus formatted body, skipping
+    /// the quote-strip.
     fn html_candidate(email: &Email) -> Option<(String, bool)> {
-        if let Some((html, truncated, _)) = email
+        if let Some((html, truncated, content_type)) = email
             .html_body()
             .and_then(|parts| Self::extract_body(email, parts))
+            && (content_type.as_deref() == Some("text/html") || looks_like_html(&html))
         {
             return Some((html, truncated));
         }
@@ -680,6 +686,35 @@ mod tests {
         let body = EmailBody::from_email(&link_email(), RenderMode::Rich);
         let html = body.html.as_deref().expect("rich mode emits a formatted body");
         assert!(html.contains("<img"), "rich mode keeps images: {html}");
+    }
+
+    #[test]
+    fn plain_only_email_emits_no_html_even_when_htmlbody_aliases_plain() {
+        // A plain-text-only ProtonMail reply: JMAP points BOTH textBody and
+        // htmlBody at the same text/plain part. The bridge must not treat that
+        // as an HTML alternative — otherwise the raw plain text (with its quoted
+        // trailer) is emitted as formatted_body and Element shows the un-stripped
+        // quote even though the plain body was stripped. (Regression: kelpy
+        // event $yov7… showed body="9012" but formatted_body kept "> 5678".)
+        let email = email_from_json(serde_json::json!({
+            "id": "e6",
+            "threadId": "t6",
+            "textBody": [{ "partId": "1", "type": "text/plain" }],
+            "htmlBody": [{ "partId": "1", "type": "text/plain" }],
+            "bodyValues": {
+                "1": {
+                    "value": "9012\n\n\n\nOn Wednesday, June 17th, 2026 at 00:07, Thomas Kelly  wrote:\n\n> 5678\n>",
+                    "isTruncated": false
+                }
+            }
+        }));
+        let body = EmailBody::from_email(&email, RenderMode::Links);
+        assert_eq!(body.plain, "9012");
+        assert!(
+            body.html.is_none(),
+            "a plain-only email must not emit a formatted body: {:?}",
+            body.html
+        );
     }
 
     #[test]
