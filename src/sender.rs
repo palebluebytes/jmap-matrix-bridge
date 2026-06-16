@@ -69,14 +69,15 @@ impl JmapSender {
         to: &str,
         subject: &str,
         body: &str,
-        parent_email_id: &str,
-        _thread_id: &str,
+        _parent_email_id: &str,
+        thread_id: &str,
         attachments: Vec<AttachmentInfo>,
     ) -> Result<String> {
-        // Thread correctly using the parent's RFC 5322 Message-ID and references
-        // chain — NOT the JMAP internal email id (which means nothing to other
-        // mail servers or to Stalwart's own thread grouping).
-        let (in_reply_to, references) = self.reply_headers(parent_email_id).await;
+        // Thread correctly using real RFC 5322 Message-IDs from the JMAP thread —
+        // NOT the JMAP internal email id (which means nothing to other mail
+        // servers or to Stalwart's own thread grouping). Resolving from the
+        // thread is robust: it doesn't depend on a single, possibly-stale parent.
+        let (in_reply_to, references) = self.reply_headers(thread_id).await;
         let refs: Vec<&str> = references.iter().map(String::as_str).collect();
         self.submit(EmailBuilder {
             to,
@@ -89,38 +90,62 @@ impl JmapSender {
         .await
     }
 
-    /// Resolve a parent email's RFC `Message-ID` and `References` so a reply can
-    /// thread. Returns `(in_reply_to, references)` where `references` is the
-    /// parent's chain plus its own Message-ID. Best-effort: empty on failure
-    /// (the reply still sends, just unthreaded).
-    async fn reply_headers(&self, parent_email_id: &str) -> (Option<String>, Vec<String>) {
+    /// Resolve `(in_reply_to, references)` for a reply from the JMAP thread:
+    /// `references` = every Message-ID in the thread (oldest→newest), and
+    /// `in_reply_to` = the newest message's Message-ID. Best-effort: empty on
+    /// failure (the reply still sends, just unthreaded).
+    async fn reply_headers(&self, thread_id: &str) -> (Option<String>, Vec<String>) {
+        // 1. The thread's email ids, in display order (oldest first).
+        let email_ids: Vec<String> = {
+            let mut request = self.client.build();
+            request.get_thread().ids([thread_id.to_owned()]);
+            match request.send().await {
+                Ok(mut r) => r
+                    .pop_method_response()
+                    .and_then(|m| m.unwrap_get_thread().ok())
+                    .and_then(|mut t| t.take_list().into_iter().next())
+                    .map_or_else(Vec::new, |thread| thread.email_ids().to_vec()),
+                Err(e) => {
+                    tracing::warn!(error = %e, thread_id, "Failed to fetch thread for reply threading");
+                    return (None, Vec::new());
+                }
+            }
+        };
+        if email_ids.is_empty() {
+            return (None, Vec::new());
+        }
+
+        // 2. Their Message-IDs.
         let mut request = self.client.build();
         request
             .get_email()
-            .ids([parent_email_id.to_owned()])
-            .properties([Property::MessageId, Property::References]);
-        let mut response = match request.send().await {
-            Ok(r) => r,
+            .ids(email_ids.clone())
+            .properties([Property::MessageId]);
+        let emails = match request.send().await {
+            Ok(mut r) => r
+                .pop_method_response()
+                .and_then(|m| m.unwrap_get_email().ok())
+                .map_or_else(Vec::new, |mut g| g.take_list()),
             Err(e) => {
-                tracing::warn!(error = %e, parent_email_id, "Failed to fetch parent for threading");
+                tracing::warn!(error = %e, thread_id, "Failed to fetch thread emails for threading");
                 return (None, Vec::new());
             }
         };
-        let Some(email) = response
-            .pop_method_response()
-            .and_then(|r| r.unwrap_get_email().ok())
-            .and_then(|mut get| get.take_list().into_iter().next())
-        else {
-            return (None, Vec::new());
-        };
-        let message_id = email.message_id().and_then(<[String]>::first).cloned();
-        let mut references: Vec<String> = email.references().map(<[String]>::to_vec).unwrap_or_default();
-        if let Some(mid) = &message_id
-            && !references.iter().any(|r| r == mid)
-        {
-            references.push(mid.clone());
+
+        // 3. Build the chain in thread order; In-Reply-To = the newest message.
+        let mut references: Vec<String> = Vec::new();
+        let mut in_reply_to: Option<String> = None;
+        for eid in &email_ids {
+            if let Some(email) = emails.iter().find(|e| e.id() == Some(eid.as_str()))
+                && let Some(mid) = email.message_id().and_then(<[String]>::first)
+            {
+                if !references.iter().any(|r| r == mid) {
+                    references.push(mid.clone());
+                }
+                in_reply_to = Some(mid.clone());
+            }
         }
-        (message_id, references)
+        (in_reply_to, references)
     }
 
     /// Returns the server-advertised maximum upload size in bytes.

@@ -33,8 +33,28 @@ async fn test_reply_to_email_sets_references() {
         .mount(&mock_server)
         .await;
 
-    // reply_to_email first fetches the parent's RFC Message-ID/References so the
-    // reply threads. Answer that Email/get.
+    // reply_to_email resolves Message-IDs from the JMAP thread: Thread/get gives
+    // the email ids, then Email/get gives their Message-IDs.
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(|request: &wiremock::Request| {
+            let json: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            json["methodCalls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c[0] == "Thread/get")
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Thread/get", {
+                "accountId": "acc1", "state": "s1", "notFound": [],
+                "list": [{ "id": "thread-123", "emailIds": ["e_root", "e_reply"] }]
+            }, "0"]]
+        })))
+        .with_priority(1)
+        .mount(&mock_server)
+        .await;
     Mock::given(method("POST"))
         .and(path("/api"))
         .and(|request: &wiremock::Request| {
@@ -49,11 +69,10 @@ async fn test_reply_to_email_sets_references() {
             "sessionState": "s1",
             "methodResponses": [["Email/get", {
                 "accountId": "acc1", "state": "s1", "notFound": [],
-                "list": [{
-                    "id": "message-id-123",
-                    "messageId": ["<msgid-1@example.com>"],
-                    "references": ["<root@example.com>"]
-                }]
+                "list": [
+                    { "id": "e_root", "messageId": ["<root@example.com>"] },
+                    { "id": "e_reply", "messageId": ["<msgid-1@example.com>"] }
+                ]
             }, "0"]]
         })))
         .with_priority(1)

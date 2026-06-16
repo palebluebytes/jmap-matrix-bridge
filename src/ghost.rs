@@ -486,34 +486,38 @@ async fn resolve_thread_context(
         }
     }
 
-    // 2. Fall back to the room's most recent thread.
+    // 2. Fall back to the room's most recent thread. The parent email id is
+    //    best-effort only — threading now resolves Message-IDs from the JMAP
+    //    thread itself (see JmapSender::reply_headers), so a missing parent must
+    //    NOT prevent us from taking the reply path.
     if let Ok(Some((jmap_thread_id, root_event_id, subject))) = state
         .client_manager
         .store
         .get_latest_thread_in_room(rm_id)
         .await
     {
-        if let Ok(Some(parent_email_id)) = state
+        let parent_email_id = state
             .client_manager
             .store
             .get_last_email_id_by_room(rm_id)
             .await
-        {
-            let latest_event_id = state
-                .client_manager
-                .store
-                .get_thread_info(&jmap_thread_id)
-                .await?
-                .and_then(|(_, _, latest)| latest);
-            let subject_str = subject.unwrap_or_else(|| "No Subject".to_owned());
-            return Ok(Some((
-                jmap_thread_id,
-                parent_email_id,
-                root_event_id,
-                latest_event_id,
-                subject_str,
-            )));
-        }
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let latest_event_id = state
+            .client_manager
+            .store
+            .get_thread_info(&jmap_thread_id)
+            .await?
+            .and_then(|(_, _, latest)| latest);
+        let subject_str = subject.unwrap_or_else(|| "No Subject".to_owned());
+        return Ok(Some((
+            jmap_thread_id,
+            parent_email_id,
+            root_event_id,
+            latest_event_id,
+            subject_str,
+        )));
     }
 
     Ok(None)
