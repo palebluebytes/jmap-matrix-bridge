@@ -177,7 +177,12 @@ impl JmapPoller {
             .arguments()
             .fetch_html_body_values(true)
             .fetch_text_body_values(true)
-            .max_body_value_bytes(32_768);
+            // Cap the per-email body we pull from JMAP. 32 KB was too small for
+            // HTML newsletters (routinely 100-200 KB of layout markup + invisible
+            // spacer padding), which tripped the "truncated by server" notice on
+            // ordinary marketing mail. 512 KB covers those while still bounding
+            // pathological bodies.
+            .max_body_value_bytes(524_288);
         let mut response = request
             .send()
             .await?
