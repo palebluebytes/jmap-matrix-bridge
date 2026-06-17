@@ -302,6 +302,57 @@ fn strip_quoted_reply(s: &str) -> String {
     kept.join("\n").trim_end().to_owned()
 }
 
+/// Build a standard email reply quote: an attribution line followed by the
+/// parent message, each line `>`-prefixed. This is the INVERSE of
+/// [`strip_quoted_reply`] — the attribution is emitted as `On {date}, {from}
+/// wrote:` precisely so that `strip_quoted_reply` recognises and removes it
+/// (the `starts_with("On ") && ends_with("wrote:")` rule). That matched pair is
+/// what lets the bridge add a quote to outbound email while keeping the Matrix
+/// timeline clean: when the quote round-trips back, it is stripped on ingest.
+#[must_use]
+pub(crate) fn format_reply_quote(from: &str, date: &str, body: &str) -> String {
+    let quoted = body
+        .lines()
+        .map(|l| {
+            if l.is_empty() {
+                ">".to_owned()
+            } else {
+                format!("> {l}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("On {date}, {from} wrote:\n{quoted}")
+}
+
+/// Format a Unix epoch (seconds, UTC) as `YYYY-MM-DD HH:MM UTC` for a reply
+/// attribution line. Dependency-free (the crate carries no date library): the
+/// calendar date comes from Howard Hinnant's `civil_from_days` algorithm.
+#[must_use]
+pub(crate) fn format_utc(epoch: i64) -> String {
+    let days = epoch.div_euclid(86_400);
+    let secs = epoch.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    let hour = secs / 3_600;
+    let min = (secs % 3_600) / 60;
+    format!("{y:04}-{m:02}-{d:02} {hour:02}:{min:02} UTC")
+}
+
+/// Days since the Unix epoch (1970-01-01) → `(year, month, day)`.
+/// Howard Hinnant's `civil_from_days` (<http://howardhinnant.github.io/date_algorithms.html>).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32; // [1, 12]
+    (y + i64::from(m <= 2), m, d)
+}
+
 /// Bridge JMAP attachments to Matrix media repository and send them in the room.
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_attachments(
@@ -619,6 +670,31 @@ mod tests {
         let body = EmailBody::from_email(&email, RenderMode::Links);
         assert_eq!(body.plain, "09123");
         assert!(!body.plain.contains("> 5678") && !body.plain.contains("wrote:"));
+    }
+
+    #[test]
+    fn format_utc_renders_known_epochs() {
+        use super::format_utc;
+        assert_eq!(format_utc(0), "1970-01-01 00:00 UTC");
+        // 2001-09-09 01:46:40 UTC
+        assert_eq!(format_utc(1_000_000_000), "2001-09-09 01:46 UTC");
+    }
+
+    #[test]
+    fn format_reply_quote_structure() {
+        use super::format_reply_quote;
+        let q = format_reply_quote("Thomas <t@x>", "2026-06-17 00:07 UTC", "a\n\nb");
+        assert_eq!(q, "On 2026-06-17 00:07 UTC, Thomas <t@x> wrote:\n> a\n>\n> b");
+    }
+
+    #[test]
+    fn format_reply_quote_is_reversed_by_strip_quoted_reply() {
+        use super::{format_reply_quote, strip_quoted_reply};
+        // The matched-pair invariant: a body we quote is fully removed again by
+        // the inbound stripper, so the quote never leaks into the timeline.
+        let quote = format_reply_quote("Thomas <t@x>", "2026-06-17 00:07 UTC", "old line 1\nold line 2");
+        let outbound = format!("my new reply\n\n{quote}");
+        assert_eq!(strip_quoted_reply(&outbound), "my new reply");
     }
 
     #[test]

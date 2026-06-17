@@ -37,6 +37,9 @@ pub struct ClientManager {
     pub(crate) sync_limit: usize,
     pub(crate) bridge_mailboxes: bool,
     pub(crate) render_mode: RenderMode,
+    /// When true, outbound threaded replies carry a quoted-original of the
+    /// parent message (read by the reply `JmapSender` construction sites).
+    pub(crate) quote_replies: bool,
 }
 
 impl std::fmt::Debug for ClientManager {
@@ -61,6 +64,7 @@ impl ClientManager {
             sync_limit,
             bridge_mailboxes: false,
             render_mode: RenderMode::default(),
+            quote_replies: false,
         }
     }
 
@@ -76,6 +80,14 @@ impl ClientManager {
     #[must_use]
     pub const fn with_render_mode(mut self, mode: RenderMode) -> Self {
         self.render_mode = mode;
+        self
+    }
+
+    /// Enable quoting the parent message in outbound threaded replies. Off by
+    /// default — read at the reply `JmapSender` construction sites.
+    #[must_use]
+    pub const fn with_quote_replies(mut self, enabled: bool) -> Self {
+        self.quote_replies = enabled;
         self
     }
 

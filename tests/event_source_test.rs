@@ -152,6 +152,7 @@ async fn test_poll_with_mock_jmap() {
         store,
         10,
         true,
+        jmap_matrix_bridge::services::content::RenderMode::default(),
     );
 
     // poll() should run without error, hitting mock endpoints + mock demo section

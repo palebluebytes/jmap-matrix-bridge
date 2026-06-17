@@ -77,6 +77,12 @@ enum Commands {
         #[arg(long, env = "RENDER_MODE", default_value = "links")]
         render_mode: String,
 
+        /// Quote the parent message in outbound threaded replies (standard email
+        /// convention). On by default. The quote lives only in the outbound
+        /// email — it never appears in Matrix.
+        #[arg(long, env = "QUOTE_REPLIES", default_value = "true")]
+        quote_replies: bool,
+
         /// Matrix Homeserver URL
         #[arg(long, env = "MATRIX_URL")]
         matrix_url: String,
@@ -231,6 +237,7 @@ async fn main() -> anyhow::Result<()> {
             jmap_sync_limit,
             bridge_mailboxes,
             render_mode,
+            quote_replies,
             matrix_url,
             matrix_as_token,
             matrix_hs_token,
@@ -301,7 +308,8 @@ async fn main() -> anyhow::Result<()> {
             let client_manager = Arc::new(
                 client_manager::ClientManager::new(store.clone(), matrix.clone(), jmap_sync_limit)
                     .with_bridge_mailboxes(bridge_mailboxes)
-                    .with_render_mode(render_mode),
+                    .with_render_mode(render_mode)
+                    .with_quote_replies(quote_replies),
             );
 
             // Register bot user to ensure it exists in Conduit

@@ -175,6 +175,7 @@ async fn test_initial_sync_registers_backfill_when_limit_is_reached() {
         store.clone(),
         5, // sync_limit is 5
         true,
+        jmap_matrix_bridge::services::content::RenderMode::default(),
     );
 
     poller.sync_emails().await.unwrap();
@@ -258,6 +259,7 @@ async fn test_initial_sync_does_not_register_backfill_when_below_limit() {
         store.clone(),
         5, // sync_limit is 5
         true,
+        jmap_matrix_bridge::services::content::RenderMode::default(),
     );
 
     poller.sync_emails().await.unwrap();
@@ -370,6 +372,7 @@ async fn test_backfill_batch_progresses_and_completes() {
         store.clone(),
         5, // sync_limit is 5
         true,
+        jmap_matrix_bridge::services::content::RenderMode::default(),
     );
 
     // Run first backfill batch

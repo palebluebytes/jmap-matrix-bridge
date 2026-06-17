@@ -134,7 +134,8 @@ impl Command for ReplyCommand {
             )
             .await;
 
-            let sender = JmapSender::new(client);
+            let sender =
+                JmapSender::new(client).with_quote_replies(state.client_manager.quote_replies);
             match sender
                 .reply_to_email(
                     from_email,

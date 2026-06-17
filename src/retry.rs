@@ -21,7 +21,8 @@ pub async fn run_retry_loop(store: Store, manager: Arc<ClientManager>, matrix: M
 
                     let mut updated = false;
                     if let Some(client) = manager.get_client(&msg.matrix_user_id).await {
-                        let sender = JmapSender::new(client);
+                        let sender =
+                            JmapSender::new(client).with_quote_replies(manager.quote_replies);
 
                         match store.get_ghost_email_by_room(&msg.room_id).await {
                             Ok(Some(email)) => {

@@ -31,6 +31,10 @@ pub struct AttachmentInfo {
 #[derive(Clone)]
 pub struct JmapSender {
     pub(crate) client: Arc<Client>,
+    /// When true, threaded replies carry a standard quoted-original of the
+    /// parent message. The quote lives ONLY in the outbound email — it is never
+    /// written to Matrix (the inbound path strips quotes for display).
+    quote_replies: bool,
 }
 
 impl std::fmt::Debug for JmapSender {
@@ -41,7 +45,18 @@ impl std::fmt::Debug for JmapSender {
 
 impl JmapSender {
     pub const fn new(client: Arc<Client>) -> Self {
-        Self { client }
+        Self {
+            client,
+            quote_replies: false,
+        }
+    }
+
+    /// Enable quoting the parent message in outbound replies (off by default).
+    /// Mirrors the const-builder pattern on [`crate::client_manager::ClientManager`].
+    #[must_use]
+    pub const fn with_quote_replies(mut self, enabled: bool) -> Self {
+        self.quote_replies = enabled;
+        self
     }
 
     /// Send a fresh email to `to`.  Returns the JMAP email ID on success.
@@ -79,6 +94,20 @@ impl JmapSender {
         // thread is robust: it doesn't depend on a single, possibly-stale parent.
         let (in_reply_to, references) = self.reply_headers(thread_id).await;
         let refs: Vec<&str> = references.iter().map(String::as_str).collect();
+
+        // Optionally append a standard quoted-original of the parent message
+        // (the same message In-Reply-To points at). This is an email-layer
+        // artifact only — it never reaches Matrix — and is best-effort: if the
+        // quote can't be built the reply still sends unquoted.
+        let quoted_body = if self.quote_replies {
+            self.reply_quote(thread_id)
+                .await
+                .map(|quote| format!("{body}\n\n{quote}"))
+        } else {
+            None
+        };
+        let body = quoted_body.as_deref().unwrap_or(body);
+
         self.submit(EmailBuilder {
             to,
             subject,
@@ -96,21 +125,7 @@ impl JmapSender {
     /// failure (the reply still sends, just unthreaded).
     async fn reply_headers(&self, thread_id: &str) -> (Option<String>, Vec<String>) {
         // 1. The thread's email ids, in display order (oldest first).
-        let email_ids: Vec<String> = {
-            let mut request = self.client.build();
-            request.get_thread().ids([thread_id.to_owned()]);
-            match request.send().await {
-                Ok(mut r) => r
-                    .pop_method_response()
-                    .and_then(|m| m.unwrap_get_thread().ok())
-                    .and_then(|mut t| t.take_list().into_iter().next())
-                    .map_or_else(Vec::new, |thread| thread.email_ids().to_vec()),
-                Err(e) => {
-                    tracing::warn!(error = %e, thread_id, "Failed to fetch thread for reply threading");
-                    return (None, Vec::new());
-                }
-            }
-        };
+        let email_ids = self.thread_email_ids(thread_id).await;
         if email_ids.is_empty() {
             return (None, Vec::new());
         }
@@ -146,6 +161,82 @@ impl JmapSender {
             }
         }
         (in_reply_to, references)
+    }
+
+    /// The thread's email ids in display order (oldest first); the last is the
+    /// newest message, which `In-Reply-To` points at. Best-effort: empty on
+    /// failure. Shared by [`reply_headers`] and [`reply_quote`] so threading and
+    /// quoting always reference the same message.
+    async fn thread_email_ids(&self, thread_id: &str) -> Vec<String> {
+        let mut request = self.client.build();
+        request.get_thread().ids([thread_id.to_owned()]);
+        match request.send().await {
+            Ok(mut r) => r
+                .pop_method_response()
+                .and_then(|m| m.unwrap_get_thread().ok())
+                .and_then(|mut t| t.take_list().into_iter().next())
+                .map_or_else(Vec::new, |thread| thread.email_ids().to_vec()),
+            Err(e) => {
+                tracing::warn!(error = %e, thread_id, "Failed to fetch thread");
+                Vec::new()
+            }
+        }
+    }
+
+    /// Build a plain-text quote of the newest message in the thread — the same
+    /// message `In-Reply-To` points at — formatted as a standard reply trailer
+    /// (`On {date}, {from} wrote:` followed by the `>`-quoted original body).
+    /// Best-effort: returns `None` on any failure so a reply still sends.
+    async fn reply_quote(&self, thread_id: &str) -> Option<String> {
+        let newest = self.thread_email_ids(thread_id).await.pop()?;
+
+        let mut request = self.client.build();
+        let email_req = request.get_email();
+        email_req.ids([newest]).properties([
+            Property::From,
+            Property::SentAt,
+            Property::ReceivedAt,
+            Property::TextBody,
+            Property::BodyValues,
+        ]);
+        email_req
+            .arguments()
+            .fetch_text_body_values(true)
+            .max_body_value_bytes(65_536);
+        let email = request
+            .send()
+            .await
+            .ok()?
+            .pop_method_response()?
+            .unwrap_get_email()
+            .ok()?
+            .take_list()
+            .into_iter()
+            .next()?;
+
+        // Attribution: prefer "Name <addr>", fall back to the bare address.
+        let from = email.from().and_then(|f| f.first()).map_or_else(
+            String::new,
+            |addr| {
+                addr.name().map_or_else(
+                    || addr.email().to_owned(),
+                    |name| format!("{name} <{}>", addr.email()),
+                )
+            },
+        );
+        let date = crate::services::content::format_utc(
+            email.sent_at().or_else(|| email.received_at())?,
+        );
+        let body = email
+            .text_body()
+            .and_then(|parts| parts.first())
+            .and_then(|part| part.part_id())
+            .and_then(|pid| email.body_value(pid))
+            .map(|v| v.value().to_owned())?;
+
+        Some(crate::services::content::format_reply_quote(
+            &from, &date, &body,
+        ))
     }
 
     /// Returns the server-advertised maximum upload size in bytes.

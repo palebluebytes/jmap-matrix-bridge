@@ -138,6 +138,7 @@ async fn test_poll_hits_jmap_and_matrix_endpoints() {
         store.clone(),
         10,
         true,
+        jmap_matrix_bridge::services::content::RenderMode::default(),
     );
 
     // poll() should run without error, hitting JMAP endpoints and the mock demo section
@@ -271,6 +272,7 @@ async fn test_poll_respects_sync_limit() {
         store.clone(),
         5,
         true,
+        jmap_matrix_bridge::services::content::RenderMode::default(),
     );
 
     let result = poller.poll().await;
@@ -450,6 +452,7 @@ async fn test_poll_handles_html_email() {
         store.clone(),
         10,
         true,
+        jmap_matrix_bridge::services::content::RenderMode::default(),
     );
 
     let result = poller.poll().await;
@@ -666,6 +669,7 @@ async fn test_poll_handles_attachments() {
         store.clone(),
         10,
         true,
+        jmap_matrix_bridge::services::content::RenderMode::default(),
     );
 
     let result = poller.poll().await;

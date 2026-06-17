@@ -183,7 +183,8 @@ pub async fn handle_ghost_outbound(
 
     if let Some((jmap_thread_id, parent_id, root_event_id, latest_event_id, subject)) = thread_info
     {
-        let sender = JmapSender::new(client);
+        let sender =
+            JmapSender::new(client).with_quote_replies(state.client_manager.quote_replies);
         let reply_subject = if subject.starts_with("Re:") {
             subject
         } else {
@@ -292,7 +293,8 @@ pub async fn handle_ghost_media_outbound(
         return Ok(());
     };
 
-    let sender = JmapSender::new(client.clone());
+    let sender =
+        JmapSender::new(client.clone()).with_quote_replies(state.client_manager.quote_replies);
     let max_size = sender.max_upload_size();
 
     let att = match sender

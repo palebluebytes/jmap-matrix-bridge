@@ -117,6 +117,21 @@ in
       '';
     };
 
+    quoteReplies = lib.mkOption {
+      type = lib.types.bool;
+      default = true;
+      description = ''
+        Quote the parent message in outbound threaded replies, matching normal
+        email-client convention (an `On … wrote:` attribution followed by the
+        `>`-quoted original). On by default.
+
+        The quote is an email-layer artifact only: it is added when composing
+        the outbound message and never appears in Matrix (the inbound path
+        strips quotes for display). Set to false to send bare replies that rely
+        solely on the `In-Reply-To`/`References` threading headers.
+      '';
+    };
+
     users = lib.mkOption {
       default = [ ];
       description = ''
@@ -218,6 +233,7 @@ in
         MATRIX_URL = cfg.matrixUrl;
         BRIDGE_MAILBOXES = lib.boolToString cfg.bridgeMailboxes;
         RENDER_MODE = cfg.renderMode;
+        QUOTE_REPLIES = lib.boolToString cfg.quoteReplies;
       };
 
       serviceConfig = {

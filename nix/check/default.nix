@@ -406,6 +406,30 @@ pkgs.testers.nixosTest {
         print("Sent email subject=" + subject)
         print("OUTBOUND JMAP-accept assertion passed")
 
+        # ── QUOTE-REPLIES check ──────────────────────────────────────────────
+        # The probe was a threaded reply (it lands in M1's thread, asserted in
+        # the THREADING section below), so with quoteReplies on (the module
+        # default), reply_to_email (src/sender.rs) must append a standard
+        # quoted-original of the parent message (M1) to the outbound body. The
+        # quote is an email-layer artifact only -- it never appears in Matrix --
+        # so we assert it on the Sent copy, NOT in the Matrix timeline. This is
+        # identity-independent (we inspect the email the bridge composed, not the
+        # rejected submission), so it holds despite the VM's no-identity limit.
+        out_body = machine.succeed(
+            "curl -sS " + AUTH + " -X POST " + JMAP + "/jmap " + HDR + " -d " + json_arg(json.dumps({
+                "using": USING,
+                "methodCalls": [["Email/get", {
+                    "accountId": account_id, "ids": [first_id],
+                    "properties": ["textBody", "bodyValues"], "fetchTextBodyValues": True,
+                }, "0"]],
+            })) + " | jq -r '.methodResponses[0][1].list[0].bodyValues[].value'")
+        print("Sent email body=" + repr(out_body))
+        assert "On " in out_body and "wrote:" in out_body, \
+            "outbound reply must carry an 'On ... wrote:' attribution: " + repr(out_body)
+        assert "> Hello from JMAP injection" in out_body, \
+            "outbound reply must quote the parent message body: " + repr(out_body)
+        print("QUOTE-REPLIES assertion passed (outbound reply quotes the parent, email-layer only)")
+
         # ── SUBMISSION-RESPONSE check ────────────────────────────────────────
         # Filing the copy in Sent (above) is NOT proof of delivery: the separate
         # EmailSubmission/set can still be rejected. submit() (src/sender.rs)
