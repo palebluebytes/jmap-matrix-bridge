@@ -184,12 +184,117 @@ fn find_ci(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
 /// `RenderMode::Rich` keeps them.
 #[must_use]
 fn sanitize_for_matrix(html: &str, mode: RenderMode) -> String {
+    // Drop quoted-REPLY blockquotes (the prior message a client wraps when
+    // replying) BEFORE sanitizing, but keep editorial blockquotes (pull-quotes):
+    // ammonia's clean_content_tags is all-or-nothing per tag, so the
+    // reply-vs-editorial distinction is made here, by marker.
+    let pre = strip_reply_blockquotes(html);
     let builder = match mode {
         RenderMode::Links => &*LINKS_SANITIZER,
         // Plain never reaches here (from_email emits no formatted body for it).
         RenderMode::Plain | RenderMode::Rich => &*RICH_SANITIZER,
     };
-    builder.clean(html).to_string()
+    let cleaned = builder.clean(&pre).to_string();
+    // Collapse the `<br>` ladders ProtonMail-style composers leave (empty
+    // paragraphs) so the body isn't padded with blank lines.
+    collapse_breaks(&cleaned)
+}
+
+/// Remove quoted-REPLY blockquotes (the client's wrapper around the prior
+/// message) while KEEPING editorial blockquotes (newsletter pull-quotes etc.).
+/// Reply quotes carry a marker the editorial ones don't: Apple Mail/Thunderbird
+/// `type="cite"`, or a `*_quote` class (Gmail `gmail_quote`, Proton Mail
+/// `protonmail_quote`, Yahoo `yahoo_quoted`). Nesting-aware, so a reply that
+/// itself quotes an earlier reply is removed whole.
+#[must_use]
+fn strip_reply_blockquotes(html: &str) -> String {
+    let bytes = html.as_bytes();
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let Some(open) = find_ci(bytes, b"<blockquote", i) else {
+            out.push_str(&html[i..]);
+            break;
+        };
+        let Some(gt) = html[open..].find('>') else {
+            out.push_str(&html[i..]);
+            break;
+        };
+        let tag_end = open + gt + 1;
+        let open_tag = html[open..tag_end].to_ascii_lowercase();
+        let is_reply = open_tag.contains("type=\"cite\"")
+            || open_tag.contains("type='cite'")
+            || open_tag.contains("type=cite")
+            || open_tag.contains("_quote");
+        if !is_reply {
+            // Editorial blockquote: keep its open tag and keep scanning inside
+            // for any nested reply quotes.
+            out.push_str(&html[i..tag_end]);
+            i = tag_end;
+            continue;
+        }
+        // Reply blockquote: emit everything before it, then skip the whole region
+        // (matching close, nesting-aware).
+        out.push_str(&html[i..open]);
+        let mut depth = 1u32;
+        let mut j = tag_end;
+        while j < bytes.len() && depth > 0 {
+            let next_open = find_ci(bytes, b"<blockquote", j);
+            let next_close = find_ci(bytes, b"</blockquote", j);
+            match (next_open, next_close) {
+                (Some(o), Some(c)) if o < c => {
+                    depth += 1;
+                    j = o + b"<blockquote".len();
+                }
+                (_, Some(c)) => {
+                    depth -= 1;
+                    j = html[c..].find('>').map_or(bytes.len(), |g| c + g + 1);
+                }
+                (Some(o), None) => {
+                    depth += 1;
+                    j = o + b"<blockquote".len();
+                }
+                (None, None) => j = bytes.len(),
+            }
+        }
+        i = j;
+    }
+    out
+}
+
+/// Collapse runs of `<br>` (ammonia normalizes `<br/>`/`<br />` to `<br>`) to at
+/// most two, ignoring whitespace between them, and drop a trailing run — so the
+/// empty paragraphs mail composers leave don't render as a ladder of blank lines.
+#[must_use]
+fn collapse_breaks(s: &str) -> String {
+    const BR: &str = "<br>";
+    let bytes = s.as_bytes();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    let mut run = 0u32;
+    while i < s.len() {
+        // Optional whitespace followed by a <br> counts as a break unit.
+        let mut j = i;
+        while j < bytes.len() && matches!(bytes[j], b' ' | b'\t' | b'\n' | b'\r') {
+            j += 1;
+        }
+        if s[j..].starts_with(BR) {
+            run += 1;
+            if run <= 2 {
+                out.push_str(BR);
+            }
+            i = j + BR.len();
+        } else {
+            run = 0;
+            let ch = s[i..].chars().next().unwrap_or(' ');
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    while out.ends_with(BR) {
+        out.truncate(out.len() - BR.len());
+    }
+    out.trim().to_owned()
 }
 
 static RICH_SANITIZER: LazyLock<Builder<'static>> = LazyLock::new(|| matrix_sanitizer(false));
@@ -212,7 +317,7 @@ fn matrix_sanitizer(links_mode: bool) -> Builder<'static> {
     let mut tags: HashSet<&str> = HashSet::from([
         "del", "h1", "h2", "h3", "h4", "h5", "h6", "p", "a", "ul", "ol", "sup", "sub", "li", "b",
         "i", "u", "strong", "em", "s", "code", "hr", "br", "div", "span", "img", "pre", "details",
-        "summary",
+        "summary", "blockquote",
     ]);
     if links_mode {
         tags.remove("img"); // void → dropped entirely
@@ -230,14 +335,9 @@ fn matrix_sanitizer(links_mode: bool) -> Builder<'static> {
     let mut b = Builder::default();
     b.tags(tags)
         // Removed WITH their content: chrome (so `<style>` CSS does not leak as
-        // text when unwrapped) and quoted-reply blocks.
-        .clean_content_tags(HashSet::from([
-            "script",
-            "style",
-            "head",
-            "title",
-            "blockquote",
-        ]))
+        // text when unwrapped). Quoted-reply blockquotes are dropped separately
+        // (strip_reply_blockquotes) so EDITORIAL blockquotes survive as content.
+        .clean_content_tags(HashSet::from(["script", "style", "head", "title"]))
         .tag_attributes(tag_attributes)
         // No blanket attributes — only the per-tag ones above plus data-mx-*.
         .generic_attributes(HashSet::new())
@@ -260,8 +360,12 @@ fn matrix_sanitizer(links_mode: bool) -> Builder<'static> {
 }
 
 /// Tidy converted plain text: drop invisible padding characters (soft hyphen,
-/// zero-width space, BOM) that marketing emails use as preheader spacers, and
-/// collapse 3+ blank lines.
+/// zero-width space, BOM) that marketing emails use as preheader spacers, trim
+/// trailing whitespace per line, and collapse blank-line runs to a single blank
+/// line. Trimming per line matters because a "blank" line that contains spaces
+/// or tabs is NOT bare-newline-adjacent — `html2text` of Proton Mail's nested
+/// empty HTML blocks emits a ladder of indented whitespace-only lines, which a
+/// naive newline-run collapse would leave intact.
 #[must_use]
 fn normalize_plain(s: &str) -> String {
     let filtered: String = s
@@ -269,16 +373,18 @@ fn normalize_plain(s: &str) -> String {
         .filter(|&c| c != '\u{00AD}' && c != '\u{200B}' && c != '\u{FEFF}')
         .collect();
     let mut out = String::with_capacity(filtered.len());
-    let mut newlines = 0u32;
-    for c in filtered.chars() {
-        if c == '\n' {
-            newlines += 1;
-            if newlines <= 2 {
-                out.push(c);
+    let mut blank_run = 0u32;
+    for line in filtered.lines() {
+        let line = line.trim_end();
+        if line.is_empty() {
+            blank_run += 1;
+            if blank_run <= 1 {
+                out.push('\n');
             }
         } else {
-            newlines = 0;
-            out.push(c);
+            blank_run = 0;
+            out.push_str(line);
+            out.push('\n');
         }
     }
     out.trim().to_owned()
@@ -680,6 +786,51 @@ mod tests {
         // soft hyphen + zero-width space padding, and 4 blank lines.
         let input = "Hi\u{00AD}\u{200B}there\n\n\n\n\nbye";
         assert_eq!(normalize_plain(input), "Hithere\n\nbye");
+    }
+
+    #[test]
+    fn normalize_plain_collapses_whitespace_only_lines() {
+        use super::normalize_plain;
+        // ProtonMail's nested empty HTML renders (via html2text) to a ladder of
+        // INDENTED blank lines; a bare-newline collapse would leave them intact.
+        let input = "1234\n\n    \n        \n            \nbye";
+        assert_eq!(normalize_plain(input), "1234\n\nbye");
+        // Trailing whitespace-only lines vanish entirely.
+        assert_eq!(normalize_plain("1234\n   \n      \n"), "1234");
+    }
+
+    #[test]
+    fn editorial_blockquote_is_kept_but_reply_blockquote_is_dropped() {
+        use super::{RenderMode, sanitize_for_matrix};
+        // Editorial pull-quote (no reply marker) must survive as content — this
+        // is the Pragmatic-Programmer-quote regression.
+        let editorial = "<p>These are the lines that got me:</p>\
+                         <blockquote><p>Conventional wisdom says…just plain wrong.</p></blockquote>\
+                         <p>That's from The Pragmatic Programmer.</p>";
+        let out = sanitize_for_matrix(editorial, RenderMode::Rich);
+        assert!(
+            out.contains("Conventional wisdom") && out.contains("<blockquote"),
+            "editorial blockquote content must be preserved: {out}"
+        );
+        // Reply quote (Apple Mail type=cite / Gmail gmail_quote) is still dropped.
+        for reply in [
+            "<p>hi</p><blockquote type=\"cite\"><p>old message</p></blockquote>",
+            "<p>hi</p><blockquote class=\"gmail_quote\"><p>old message</p></blockquote>",
+        ] {
+            let out = sanitize_for_matrix(reply, RenderMode::Rich);
+            assert!(
+                out.contains("hi") && !out.contains("old message") && !out.contains("<blockquote"),
+                "reply blockquote must be dropped: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn collapse_breaks_trims_and_collapses_runs() {
+        use super::collapse_breaks;
+        assert_eq!(collapse_breaks("1234<br><br><br><br>"), "1234");
+        assert_eq!(collapse_breaks("a<br>\n<br>\n<br>\n<br>b"), "a<br><br>b");
+        assert_eq!(collapse_breaks("<p>hi</p>"), "<p>hi</p>");
     }
 
     #[test]

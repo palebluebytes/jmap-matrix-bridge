@@ -352,6 +352,12 @@ impl JmapPoller {
         if let Err(e) = self.matrix.set_room_name(&room_id, subject).await {
             warn!(error = %e, "Failed to set thread room name");
         }
+        // Topic shows directly under Element's room-intro line, so make it carry
+        // the email context: who it's with and what it's about.
+        let topic = format!("Email with {} about {subject}", ghost.email);
+        if let Err(e) = self.matrix.set_room_topic(&room_id, &topic).await {
+            warn!(error = %e, "Failed to set thread room topic");
+        }
 
         // Saturating multiply avoids i64 overflow for far-future timestamps.
         let timestamp = email

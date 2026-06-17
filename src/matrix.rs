@@ -135,6 +135,11 @@ impl MatrixClient {
             .await
     }
 
+    pub async fn set_room_topic(&self, room_id: &str, topic: &str) -> Result<()> {
+        self.put_state(room_id, "m.room.topic", "", &serde_json::json!({ "topic": topic }))
+            .await
+    }
+
     /// Best-effort read of a room's current name from the state API, or `None`
     /// if unset/unreadable. Used to pick the subject for a fresh outbound email.
     pub async fn room_name(&self, room_id: &str) -> Option<String> {
