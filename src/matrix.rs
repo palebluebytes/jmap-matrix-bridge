@@ -275,9 +275,22 @@ impl MatrixClient {
         if status.is_success() {
             tracing::trace!("Matrix API success response body: {body_str}");
         } else {
-            tracing::warn!(
-                "Matrix API error response for ghost {user_id} {method} {url}: {status} - body: {body_str}"
-            );
+            // The "membership `leave` is not `join`" 403 is expected and recovered
+            // by the caller (send_as_ghost_joining invites + joins the ghost and
+            // retries), e.g. when a multi-party thread's room was created for a
+            // different participant's ghost. Log that quietly; surface every other
+            // API error loudly. Keep the match in sync with is_ghost_not_joined.
+            let recoverable_not_joined =
+                status.as_u16() == 403 && body_str.contains("is not `join`");
+            if recoverable_not_joined {
+                tracing::debug!(
+                    "Ghost {user_id} not joined to room ({method} {url}); will invite+join+retry"
+                );
+            } else {
+                tracing::warn!(
+                    "Matrix API error response for ghost {user_id} {method} {url}: {status} - body: {body_str}"
+                );
+            }
             // Surface the status and raw body so callers can react (e.g. join
             // the ghost and retry on a membership 403). Parsing a non-success
             // response with try_from_http_response would otherwise yield an

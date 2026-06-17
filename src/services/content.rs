@@ -96,6 +96,7 @@ impl EmailBody {
             }),
         };
 
+        let (plain, html) = clamp_to_matrix_limit(plain, html);
         Self { plain, html }
     }
 
@@ -281,6 +282,53 @@ fn normalize_plain(s: &str) -> String {
         }
     }
     out.trim().to_owned()
+}
+
+/// Byte budget for a bridged message's `body` + `formatted_body`. Matrix rejects
+/// any event whose serialized PDU exceeds 65535 bytes (`M_TOO_LARGE`); the rest
+/// of the 64 KB is headroom for the envelope (sender/room/type plus the
+/// server-added auth/prev-events, hashes and signatures).
+const MATRIX_BODY_BUDGET: usize = 57_000;
+
+const MATRIX_TRUNCATION_NOTICE: &str =
+    "\n\n[Message truncated — too large for Matrix; view the full email in your mail client.]";
+
+/// Bound `(plain, html)` so their combined byte length fits [`MATRIX_BODY_BUDGET`],
+/// so a large email is delivered TRUNCATED rather than dropped with
+/// `M_TOO_LARGE`. HTML cannot be byte-truncated without breaking tags, so an
+/// oversized formatted body is dropped entirely (Element falls back to the plain
+/// body, which is a faithful `html2text` rendering); the plain body is truncated
+/// on a UTF-8 boundary with a notice.
+fn clamp_to_matrix_limit(plain: String, html: Option<String>) -> (String, Option<String>) {
+    let html = html.filter(|h| h.len() <= MATRIX_BODY_BUDGET);
+    let allowance = MATRIX_BODY_BUDGET - html.as_ref().map_or(0, String::len);
+    if plain.len() <= allowance {
+        return (plain, html);
+    }
+    let keep = allowance.saturating_sub(MATRIX_TRUNCATION_NOTICE.len());
+    let mut out = clamp_utf8(&plain, keep);
+    out.push_str(MATRIX_TRUNCATION_NOTICE);
+    (out, html)
+}
+
+/// Truncate `s` to at most `max_bytes` without splitting a UTF-8 codepoint,
+/// preferring the last newline/space within the tail for a cleaner break.
+fn clamp_utf8(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_owned();
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    // Back up to the last whitespace if it is close to the cut (avoids chopping a
+    // word in half), but not if the only whitespace is far back (e.g. a long URL).
+    if let Some(ws) = s[..end].rfind([' ', '\n']) {
+        if end - ws < 200 {
+            end = ws;
+        }
+    }
+    s[..end].trim_end().to_owned()
 }
 
 /// Drop the quoted-reply trailer that mail clients append when replying — the
@@ -697,6 +745,65 @@ mod tests {
         let quote = format_reply_quote("Thomas <t@x>", "2026-06-17 00:07 UTC", "old line 1\nold line 2");
         let outbound = format!("my new reply\n\n{quote}");
         assert_eq!(strip_quoted_reply(&outbound), "my new reply");
+    }
+
+    #[test]
+    fn clamp_utf8_never_splits_a_codepoint() {
+        use super::clamp_utf8;
+        let s = "é".repeat(100); // 200 bytes, no whitespace
+        let out = clamp_utf8(&s, 51); // 51 lands mid-codepoint -> backs up to 50
+        assert!(out.len() <= 51 && out.is_char_boundary(out.len()));
+        assert_eq!(out.chars().count(), 25, "should keep whole 'é' chars: {out:?}");
+        // Shorter than the limit -> unchanged.
+        assert_eq!(clamp_utf8("hi", 100), "hi");
+    }
+
+    #[test]
+    fn clamp_drops_oversized_html_and_truncates_plain() {
+        use super::{MATRIX_BODY_BUDGET, clamp_to_matrix_limit};
+        let html = Some(format!("<p>{}</p>", "a".repeat(MATRIX_BODY_BUDGET)));
+        let plain = "word ".repeat(MATRIX_BODY_BUDGET); // way over budget
+        let (p, h) = clamp_to_matrix_limit(plain, html);
+        assert!(h.is_none(), "oversized formatted body must be dropped");
+        assert!(p.len() <= MATRIX_BODY_BUDGET, "plain must fit the budget: {}", p.len());
+        assert!(p.contains("truncated"), "a truncation notice must be appended");
+    }
+
+    #[test]
+    fn clamp_keeps_small_html_and_shrinks_plain() {
+        use super::{MATRIX_BODY_BUDGET, clamp_to_matrix_limit};
+        let html = Some("<p>small</p>".to_owned());
+        let plain = "word ".repeat(MATRIX_BODY_BUDGET);
+        let (p, h) = clamp_to_matrix_limit(plain, html.clone());
+        assert_eq!(h, html, "a fitting formatted body must be kept");
+        assert!(
+            p.len() + h.unwrap().len() <= MATRIX_BODY_BUDGET,
+            "combined body must fit the budget"
+        );
+        assert!(p.contains("truncated"));
+    }
+
+    #[test]
+    fn clamp_leaves_small_message_unchanged() {
+        use super::clamp_to_matrix_limit;
+        let (p, h) = clamp_to_matrix_limit("hello".to_owned(), Some("<p>hello</p>".to_owned()));
+        assert_eq!(p, "hello");
+        assert_eq!(h.as_deref(), Some("<p>hello</p>"));
+    }
+
+    #[test]
+    fn from_email_clamps_a_giant_body() {
+        use super::MATRIX_BODY_BUDGET;
+        let email = email_from_json(serde_json::json!({
+            "id": "big1",
+            "threadId": "tbig",
+            "textBody": [{ "partId": "1", "type": "text/plain" }],
+            "bodyValues": { "1": { "value": "word ".repeat(MATRIX_BODY_BUDGET), "isTruncated": false } }
+        }));
+        let body = EmailBody::from_email(&email, RenderMode::Links);
+        let total = body.plain.len() + body.html.as_deref().map_or(0, str::len);
+        assert!(total <= MATRIX_BODY_BUDGET, "bridged event body must fit Matrix's limit: {total}");
+        assert!(body.plain.contains("truncated"));
     }
 
     #[test]
