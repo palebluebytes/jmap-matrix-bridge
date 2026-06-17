@@ -2,9 +2,12 @@
 
 use crate::matrix::MatrixClient;
 use crate::store::{Store, ThreadRepository};
+use ammonia::Builder;
 use anyhow::{Context, Result};
 use jmap_client::client::Client;
 use jmap_client::email::{Email, EmailBodyPart};
+use std::collections::{HashMap, HashSet};
+use std::sync::LazyLock;
 use tracing::warn;
 
 const NO_SUBJECT: &str = "(No Subject)";
@@ -89,10 +92,7 @@ impl EmailBody {
                         "<br><br><strong>[Email truncated by server due to size limit]</strong>",
                     );
                 }
-                match mode {
-                    RenderMode::Rich => clean_html_for_matrix(&html),
-                    _ => lightweight_html(&html),
-                }
+                sanitize_for_matrix(&html, mode)
             }),
         };
 
@@ -174,85 +174,88 @@ fn find_ci(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
         .find(|&i| haystack[i..i + needle.len()].eq_ignore_ascii_case(needle))
 }
 
-/// Remove every `open..close` region (case-insensitive on the ASCII delimiters).
-/// If an `open` has no matching `close`, the remainder is dropped.
-fn strip_region(s: &str, open: &str, close: &str) -> String {
-    let bytes = s.as_bytes();
-    let (ob, cb) = (open.as_bytes(), close.as_bytes());
-    let mut out = String::with_capacity(s.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let Some(start) = find_ci(bytes, ob, i) else {
-            out.push_str(&s[i..]);
-            break;
-        };
-        out.push_str(&s[i..start]);
-        let Some(end) = find_ci(bytes, cb, start + ob.len()) else {
-            break; // unterminated region: drop the rest
-        };
-        i = end + cb.len();
-    }
-    out
+/// Sanitize an HTML email body into a Matrix `formatted_body` that is provably
+/// conformant to the Matrix spec's allowed-HTML subset (spec.matrix.org), using
+/// `ammonia` as an allowlist sanitizer. Anything outside the allowlist is either
+/// unwrapped (its text content kept) or, for chrome/quoted blocks, removed with
+/// its content. `RenderMode::Links` additionally drops images and unwraps
+/// `<div>`/`<span>` so the content flows as lightweight text + clickable links;
+/// `RenderMode::Rich` keeps them.
+#[must_use]
+fn sanitize_for_matrix(html: &str, mode: RenderMode) -> String {
+    let builder = match mode {
+        RenderMode::Links => &*LINKS_SANITIZER,
+        // Plain never reaches here (from_email emits no formatted body for it).
+        RenderMode::Plain | RenderMode::Rich => &*RICH_SANITIZER,
+    };
+    builder.clean(html).to_string()
 }
 
-/// Reduce a full HTML email document to body content suitable for a Matrix
-/// `formatted_body`: drop comments, `<head>`, `<style>`, `<script>`, the
-/// doctype, and unwrap `<body>`. Matrix clients sanitize the rest on render, so
-/// this just removes the bulk/clutter rather than enforcing the tag allowlist.
-#[must_use]
-fn clean_html_for_matrix(html: &str) -> String {
-    let mut s = strip_region(html, "<!--", "-->");
-    s = strip_region(&s, "<head", "</head>");
-    s = strip_region(&s, "<style", "</style>");
-    s = strip_region(&s, "<script", "</script>");
-    // Drop quoted-reply blocks (`<blockquote …>…</blockquote>`, as Proton/Gmail/
-    // Apple Mail wrap the quoted original): the prior message is already in the
-    // room, so it is noise in the formatted body.
-    s = strip_region(&s, "<blockquote", "</blockquote>");
-    s = strip_region(&s, "<!doctype", ">");
+static RICH_SANITIZER: LazyLock<Builder<'static>> = LazyLock::new(|| matrix_sanitizer(false));
+static LINKS_SANITIZER: LazyLock<Builder<'static>> = LazyLock::new(|| matrix_sanitizer(true));
 
-    // Unwrap to the inner content of <body> … </body> if present.
-    let bytes = s.as_bytes();
-    if let Some(open) = find_ci(bytes, b"<body", 0)
-        && let Some(gt) = s[open..].find('>')
-        && let Some(close) = find_ci(bytes, b"</body>", open)
-    {
-        let inner_start = open + gt + 1;
-        if inner_start <= close {
-            s = s[inner_start..close].to_owned();
-        }
+/// Build an `ammonia::Builder` configured to the Matrix allowed-HTML subset.
+/// Everything is set explicitly (not inherited from ammonia's defaults) so the
+/// output is provably a subset of Matrix's allowlist.
+///
+/// Two deliberate, spec-conformant deviations preserve existing bridge
+/// behaviour: table tags are excluded (so newsletter table-layouts linearize —
+/// Matrix clients render tables ultra-wide without the email's CSS), and
+/// `blockquote` is dropped with its content (quoted-reply originals are already
+/// in the room, so they are noise). `links` mode further drops images and
+/// unwraps `<div>`/`<span>`.
+fn matrix_sanitizer(links_mode: bool) -> Builder<'static> {
+    // Matrix v1.18 allowed tags, minus the table tags (linearized by unwrapping)
+    // and `blockquote` (in clean_content_tags below). `font` is not a Matrix tag
+    // either, so it is unwrapped automatically.
+    let mut tags: HashSet<&str> = HashSet::from([
+        "del", "h1", "h2", "h3", "h4", "h5", "h6", "p", "a", "ul", "ol", "sup", "sub", "li", "b",
+        "i", "u", "strong", "em", "s", "code", "hr", "br", "div", "span", "img", "pre", "details",
+        "summary",
+    ]);
+    if links_mode {
+        tags.remove("img"); // void → dropped entirely
+        tags.remove("div"); // unwrapped (content kept)
+        tags.remove("span");
     }
 
-    // Linearize table-based newsletter layouts: drop the scaffolding tags
-    // (keeping their content). Matrix clients strip the CSS that newsletters use
-    // for layout (max-width, word-break), so a `<table>` column is sized to its
-    // widest element (a code block or long URL) and stretches every paragraph
-    // onto ultra-wide, non-wrapping lines. Removing the table tags lets the
-    // paragraphs flow as top-level blocks and wrap to the viewport. Longest tag
-    // first so e.g. `<thead>` is gone before the `<th>` pass.
-    for tag in [
-        "table", "thead", "tbody", "tfoot", "colgroup", "col", "tr", "td", "th", "center",
-    ] {
-        s = strip_region(&s, &format!("<{tag}"), ">");
-        s = strip_region(&s, &format!("</{tag}"), ">");
-    }
-    s.trim().to_owned()
-}
+    let tag_attributes: HashMap<&str, HashSet<&str>> = HashMap::from([
+        ("a", HashSet::from(["href", "target"])),
+        ("img", HashSet::from(["src", "width", "height", "alt", "title"])),
+        ("ol", HashSet::from(["start"])),
+        ("code", HashSet::from(["class"])),
+    ]);
 
-/// Reduce an HTML email to a lightweight formatted body: keep text, links (so
-/// buttons become clickable links) and basic inline/list formatting, but drop
-/// images and layout containers. Builds on `clean_html_for_matrix` (which
-/// already removes chrome and quoted blocks and linearizes tables), then strips
-/// images and unwraps `<div>`/`<span>`/`<font>` so the content flows as text.
-#[must_use]
-fn lightweight_html(html: &str) -> String {
-    let mut s = clean_html_for_matrix(html);
-    s = strip_region(&s, "<img", ">"); // images dropped entirely
-    for tag in ["div", "span", "font"] {
-        s = strip_region(&s, &format!("<{tag}"), ">");
-        s = strip_region(&s, &format!("</{tag}"), ">");
-    }
-    s.trim().to_owned()
+    let mut b = Builder::default();
+    b.tags(tags)
+        // Removed WITH their content: chrome (so `<style>` CSS does not leak as
+        // text when unwrapped) and quoted-reply blocks.
+        .clean_content_tags(HashSet::from([
+            "script",
+            "style",
+            "head",
+            "title",
+            "blockquote",
+        ]))
+        .tag_attributes(tag_attributes)
+        // No blanket attributes — only the per-tag ones above plus data-mx-*.
+        .generic_attributes(HashSet::new())
+        .generic_attribute_prefixes(HashSet::from(["data-mx-"]))
+        .url_schemes(HashSet::from([
+            "https", "http", "ftp", "mailto", "magnet", "mxc",
+        ]))
+        .url_relative(ammonia::UrlRelative::Deny)
+        .link_rel(Some("noopener"))
+        // `url_schemes` is global, but the Matrix spec restricts `<img src>` to
+        // `mxc://` specifically (http/https are only valid on `<a href>`). Drop a
+        // non-mxc img src so the output is a strict subset of the allowlist.
+        .attribute_filter(|element, attribute, value| {
+            if element == "img" && attribute == "src" && !value.starts_with("mxc://") {
+                return None;
+            }
+            Some(std::borrow::Cow::Borrowed(value))
+        });
+    b
 }
 
 /// Tidy converted plain text: drop invisible padding characters (soft hyphen,
@@ -326,31 +329,18 @@ pub(crate) fn format_reply_quote(from: &str, date: &str, body: &str) -> String {
 }
 
 /// Format a Unix epoch (seconds, UTC) as `YYYY-MM-DD HH:MM UTC` for a reply
-/// attribution line. Dependency-free (the crate carries no date library): the
-/// calendar date comes from Howard Hinnant's `civil_from_days` algorithm.
+/// attribution line, via `jiff`. Returns an empty string if the epoch is out of
+/// representable range (best-effort: the caller still sends the reply).
 #[must_use]
 pub(crate) fn format_utc(epoch: i64) -> String {
-    let days = epoch.div_euclid(86_400);
-    let secs = epoch.rem_euclid(86_400);
-    let (y, m, d) = civil_from_days(days);
-    let hour = secs / 3_600;
-    let min = (secs % 3_600) / 60;
-    format!("{y:04}-{m:02}-{d:02} {hour:02}:{min:02} UTC")
-}
-
-/// Days since the Unix epoch (1970-01-01) → `(year, month, day)`.
-/// Howard Hinnant's `civil_from_days` (<http://howardhinnant.github.io/date_algorithms.html>).
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097; // [0, 146096]
-    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
-    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32; // [1, 12]
-    (y + i64::from(m <= 2), m, d)
+    jiff::Timestamp::from_second(epoch).map_or_else(
+        |_| String::new(),
+        |ts| {
+            ts.to_zoned(jiff::tz::TimeZone::UTC)
+                .strftime("%Y-%m-%d %H:%M UTC")
+                .to_string()
+        },
+    )
 }
 
 /// Bridge JMAP attachments to Matrix media repository and send them in the room.
@@ -606,22 +596,34 @@ mod tests {
 
     #[test]
     fn clean_html_strips_chrome_and_unwraps_body() {
-        use super::clean_html_for_matrix;
+        use super::{RenderMode, sanitize_for_matrix};
         let dirty = "<!DOCTYPE html><html><head><style>/* css */</style></head>\
                      <body><!-- hi --><p>Hello <b>world</b></p></body></html>";
-        let clean = clean_html_for_matrix(dirty);
-        assert_eq!(clean, "<p>Hello <b>world</b></p>");
+        let clean = sanitize_for_matrix(dirty, RenderMode::Rich);
+        assert!(clean.contains("<p>Hello") && clean.contains("<b>world</b>"), "{clean}");
+        // Chrome and its CONTENT are gone (style is not merely unwrapped).
+        assert!(
+            !clean.contains("css")
+                && !clean.to_lowercase().contains("<style")
+                && !clean.to_lowercase().contains("<head")
+                && !clean.contains("<!DOCTYPE"),
+            "{clean}"
+        );
     }
 
     #[test]
     fn clean_html_linearizes_table_layout() {
-        use super::clean_html_for_matrix;
+        use super::{RenderMode, sanitize_for_matrix};
         // A newsletter table wrapper must be unwrapped so the paragraphs flow as
         // top-level blocks (otherwise Matrix renders them on ultra-wide lines).
         let dirty = "<table style=\"max-width:600px\"><tbody><tr>\
                      <td><p>First para</p><p>Second para</p></td></tr></tbody></table>";
-        let clean = clean_html_for_matrix(dirty);
-        assert_eq!(clean, "<p>First para</p><p>Second para</p>");
+        let clean = sanitize_for_matrix(dirty, RenderMode::Rich);
+        assert!(clean.contains("First para") && clean.contains("Second para"), "{clean}");
+        assert!(
+            !clean.contains("<table") && !clean.contains("<td") && !clean.contains("<tr"),
+            "table tags must be unwrapped (linearized): {clean}"
+        );
     }
 
     #[test]
@@ -699,11 +701,16 @@ mod tests {
 
     #[test]
     fn clean_html_strips_quoted_blockquote() {
-        use super::clean_html_for_matrix;
+        use super::{RenderMode, sanitize_for_matrix};
         let dirty = "<p>my reply</p>\
                      <blockquote type=\"cite\"><p>old quoted message</p></blockquote>";
-        let clean = clean_html_for_matrix(dirty);
-        assert_eq!(clean, "<p>my reply</p>");
+        let clean = sanitize_for_matrix(dirty, RenderMode::Rich);
+        assert!(clean.contains("my reply"), "{clean}");
+        // The quoted original is removed WITH its content, not just unwrapped.
+        assert!(
+            !clean.contains("old quoted message") && !clean.contains("<blockquote"),
+            "quoted blockquote must be dropped entirely: {clean}"
+        );
     }
 
     #[test]
@@ -718,14 +725,17 @@ mod tests {
 
     #[test]
     fn lightweight_html_keeps_links_drops_images_and_layout() {
-        use super::lightweight_html;
+        use super::{RenderMode, sanitize_for_matrix};
         // A Kit-style button: an <a> inside layout wrappers, plus an image.
-        let dirty = "<div class=\"box\"><img src=\"x.png\"/>\
+        let dirty = "<div class=\"box\"><img src=\"https://kit.com/x.png\"/>\
                      <a href=\"https://kit.com/confirm\">Confirm your subscription</a>\
                      <span>extra</span></div>";
-        let out = lightweight_html(dirty);
+        let out = sanitize_for_matrix(dirty, RenderMode::Links);
+        // The link survives as a clickable link (ammonia may add rel/reorder
+        // attributes, so assert on the href + text rather than the exact anchor).
         assert!(
-            out.contains("<a href=\"https://kit.com/confirm\">Confirm your subscription</a>"),
+            out.contains("href=\"https://kit.com/confirm\"")
+                && out.contains("Confirm your subscription"),
             "the link (button) must survive as a clickable link: {out}"
         );
         assert!(!out.contains("<img"), "images must be dropped: {out}");
@@ -733,6 +743,36 @@ mod tests {
             !out.contains("<div") && !out.contains("<span"),
             "layout containers must be unwrapped: {out}"
         );
+    }
+
+    #[test]
+    fn sanitize_output_is_matrix_allowlist_conformant() {
+        use super::{RenderMode, sanitize_for_matrix};
+        // Adversarial input: scripts, inline handlers, a javascript: URL, a
+        // disallowed tag, a relative + non-mxc image, and a legit data-mx-color.
+        let dirty = "<script>alert(1)</script>\
+                     <style>secretcss</style>\
+                     <p onclick=\"steal()\">hi <a href=\"javascript:alert(1)\">x</a></p>\
+                     <marquee>noped</marquee>\
+                     <img src=\"http://evil/x.png\">\
+                     <span data-mx-color=\"#ff0000\">red</span>";
+        for mode in [RenderMode::Rich, RenderMode::Links] {
+            let out = sanitize_for_matrix(dirty, mode);
+            let lower = out.to_lowercase();
+            assert!(!lower.contains("<script"), "{mode:?}: script tag survived: {out}");
+            assert!(!lower.contains("alert(1)"), "{mode:?}: script content survived: {out}");
+            assert!(!lower.contains("<style") && !lower.contains("secretcss"), "{mode:?}: style survived: {out}");
+            assert!(!lower.contains("onclick"), "{mode:?}: inline handler survived: {out}");
+            assert!(!lower.contains("javascript:"), "{mode:?}: javascript: scheme survived: {out}");
+            assert!(!lower.contains("<marquee"), "{mode:?}: disallowed tag survived: {out}");
+            // Non-mxc/non-allowed-scheme img src must be dropped (url_relative/schemes).
+            assert!(!out.contains("http://evil"), "{mode:?}: bad img src survived: {out}");
+            // The text content of unwrapped tags is preserved.
+            assert!(out.contains("hi") && out.contains("red"), "{mode:?}: text lost: {out}");
+        }
+        // data-mx-color is a Matrix attribute and must be preserved (Rich keeps span).
+        let rich = sanitize_for_matrix(dirty, RenderMode::Rich);
+        assert!(rich.contains("data-mx-color"), "data-mx-* must be preserved: {rich}");
     }
 
     fn link_email() -> Email {

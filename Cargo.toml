@@ -63,6 +63,10 @@ uuid = { version = "1", features = ["v4"] }
 scopeguard = "1.2"
 
 matrix-sdk = { version = "0.16", default-features = false, features = ["rustls-tls"] }
+ammonia = "4"
+# Only used to format a Unix epoch as a UTC string (reply-quote attribution),
+# so drop the bundled tz database — TimeZone::UTC needs no tzdb.
+jiff = { version = "0.2", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 wiremock = "0.6"
