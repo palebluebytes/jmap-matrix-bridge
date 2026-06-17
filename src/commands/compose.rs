@@ -131,7 +131,7 @@ impl Command for ComposeCommand {
             if let Err(e) = state
                 .client_manager
                 .matrix
-                .set_room_name(&room_id, subject)
+                .set_room_name(&room_id, &crate::services::content::clean_subject(subject))
                 .await
             {
                 tracing::warn!(error = %e, "Failed to set composed room name");

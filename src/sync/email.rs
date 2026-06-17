@@ -349,12 +349,16 @@ impl JmapPoller {
             &display_name,
         )
         .await?;
-        if let Err(e) = self.matrix.set_room_name(&room_id, subject).await {
+        // The room IS the thread, so strip Re:/Fwd: for the NAME (display only —
+        // the stored subject below keeps its prefix so outbound replies still
+        // carry "Re:" per email convention).
+        let room_subject = crate::services::content::clean_subject(subject);
+        if let Err(e) = self.matrix.set_room_name(&room_id, &room_subject).await {
             warn!(error = %e, "Failed to set thread room name");
         }
         // Topic shows directly under Element's room-intro line, so make it carry
         // the email context: who it's with and what it's about.
-        let topic = format!("Email with {} about {subject}", ghost.email);
+        let topic = format!("Email with {} about {room_subject}", ghost.email);
         if let Err(e) = self.matrix.set_room_topic(&room_id, &topic).await {
             warn!(error = %e, "Failed to set thread room topic");
         }

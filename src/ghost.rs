@@ -242,23 +242,44 @@ pub async fn handle_ghost_outbound(
     let subject = fresh_email_subject(state.client_manager.matrix.room_name(rm_id).await);
     info!("Sending fresh email to {ghost_email} from ghost room (subject: {subject})");
 
-    let sender = JmapSender::new(client);
-    if let Err(e) = sender
+    let sender = JmapSender::new(client.clone());
+    match sender
         .send_email(&ghost_email, &subject, &body_str, vec![])
         .await
     {
-        error!(%sender_id, %rm_id, error = %e, "Failed to send email, adding to retry queue");
-        state
-            .client_manager
-            .store
-            .add_to_outbound_queue(sender_id, rm_id, _event_id, &body_str, None, None, None)
-            .await?;
-        notify(
-            state,
-            Some(rm_id),
-            "⚠️ Network error while sending. Message queued for retry.",
-        )
-        .await;
+        Ok(email_id) => {
+            // Record this fresh email's JMAP thread -> room mapping so a later
+            // reply (e.g. "Re: compose test") continues THIS room instead of
+            // spawning a duplicate. The user's own message is the thread root.
+            // Without this, compose-originated threads are unmapped and every
+            // reply lands in a new room.
+            if let Ok(Some(thread_id)) = try_resolve_thread(&client, &email_id).await {
+                if let Err(e) = state
+                    .client_manager
+                    .store
+                    .save_thread_mapping_atomic(&thread_id, _event_id, rm_id, &subject)
+                    .await
+                {
+                    warn!(%rm_id, error = %e, "Failed to map composed thread to room");
+                }
+            } else {
+                warn!(%rm_id, %email_id, "Could not resolve thread for fresh email; a reply may spawn a new room");
+            }
+        }
+        Err(e) => {
+            error!(%sender_id, %rm_id, error = %e, "Failed to send email, adding to retry queue");
+            state
+                .client_manager
+                .store
+                .add_to_outbound_queue(sender_id, rm_id, _event_id, &body_str, None, None, None)
+                .await?;
+            notify(
+                state,
+                Some(rm_id),
+                "⚠️ Network error while sending. Message queued for retry.",
+            )
+            .await;
+        }
     }
 
     Ok(())

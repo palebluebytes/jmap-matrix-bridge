@@ -390,6 +390,28 @@ fn normalize_plain(s: &str) -> String {
     out.trim().to_owned()
 }
 
+/// Strip reply/forward prefixes (`Re:`, `Fwd:`, `Fw:`, repeated) from a subject
+/// for use as a Matrix room NAME. In Matrix the room IS the thread, so every
+/// message is a continuation and `Re:` is noise. Display-only: the outbound
+/// EMAIL subject keeps its prefix (that's email convention). Falls back to the
+/// original if stripping leaves nothing.
+#[must_use]
+pub(crate) fn clean_subject(subject: &str) -> String {
+    let mut s = subject.trim();
+    loop {
+        let lower = s.to_ascii_lowercase();
+        let Some(p) = ["re:", "fwd:", "fw:"].iter().find(|p| lower.starts_with(**p)) else {
+            break;
+        };
+        s = s[p.len()..].trim_start();
+    }
+    if s.is_empty() {
+        subject.trim().to_owned()
+    } else {
+        s.to_owned()
+    }
+}
+
 /// Byte budget for a bridged message's `body` + `formatted_body`. Matrix rejects
 /// any event whose serialized PDU exceeds 65535 bytes (`M_TOO_LARGE`); the rest
 /// of the 64 KB is headroom for the envelope (sender/room/type plus the
@@ -831,6 +853,19 @@ mod tests {
         assert_eq!(collapse_breaks("1234<br><br><br><br>"), "1234");
         assert_eq!(collapse_breaks("a<br>\n<br>\n<br>\n<br>b"), "a<br><br>b");
         assert_eq!(collapse_breaks("<p>hi</p>"), "<p>hi</p>");
+    }
+
+    #[test]
+    fn clean_subject_strips_reply_and_forward_prefixes() {
+        use super::clean_subject;
+        assert_eq!(clean_subject("Re: compose test"), "compose test");
+        assert_eq!(clean_subject("RE: Re:  Fwd: compose test"), "compose test");
+        assert_eq!(clean_subject("Fw: hello"), "hello");
+        assert_eq!(clean_subject("compose test"), "compose test");
+        // "Re:" must be a prefix, not anywhere ("Carefree:" is untouched).
+        assert_eq!(clean_subject("Carefree: living"), "Carefree: living");
+        // Degenerate all-prefix subject falls back to the original.
+        assert_eq!(clean_subject("Re:"), "Re:");
     }
 
     #[test]
