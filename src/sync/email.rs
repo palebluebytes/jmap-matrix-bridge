@@ -363,6 +363,21 @@ impl JmapPoller {
             warn!(error = %e, "Failed to set thread room topic");
         }
 
+        // One-time intro line in the timeline (Element's own "beginning of your
+        // direct message history" text isn't settable by the bridge). Posted as
+        // the contact ghost so the room stays a 1:1 with no extra members.
+        let intro = format!(
+            "📧 This is the beginning of your email with {} about “{room_subject}”.",
+            ghost.email
+        );
+        if let Err(e) = self
+            .matrix
+            .send_message_as(&room_id, &intro, None, None, None, &ghost.user_id, None)
+            .await
+        {
+            warn!(error = %e, "Failed to post room intro line");
+        }
+
         // Saturating multiply avoids i64 overflow for far-future timestamps.
         let timestamp = email
             .received_at()
