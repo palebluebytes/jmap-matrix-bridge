@@ -356,8 +356,11 @@ impl JmapPoller {
         if let Err(e) = self.matrix.set_room_name(&room_id, &room_subject).await {
             warn!(error = %e, "Failed to set thread room name");
         }
-        // Topic shows directly under Element's room-intro line, so make it carry
-        // the email context: who it's with and what it's about.
+        // The email context is conveyed by the room NAME (the subject) and the
+        // TOPIC below — both are state events Element renders as its grey
+        // "changed the room name / topic" tiles at the top of the room. No
+        // separate intro MESSAGE is posted: it would be redundant with the topic
+        // tile and, carrying a send timestamp, would disturb date ordering.
         let topic = format!("Email with {} about {room_subject}", ghost.email);
         if let Err(e) = self.matrix.set_room_topic(&room_id, &topic).await {
             warn!(error = %e, "Failed to set thread room topic");
@@ -367,26 +370,6 @@ impl JmapPoller {
         let timestamp = email
             .received_at()
             .map(|t| u64::try_from(t).unwrap_or(0).saturating_mul(1000));
-
-        // One-time intro line in the timeline (Element's own "beginning of your
-        // direct message history" text isn't settable by the bridge). Posted as
-        // the contact ghost so the room stays a 1:1 with no extra members.
-        // Stamp it 1ms BEFORE the email so the email stays the room's latest
-        // event — otherwise the intro (default ts = now) pins every room to
-        // "today" and breaks Element's date ordering.
-        let intro = format!(
-            "📧 This is the beginning of your email with {} about “{room_subject}”.",
-            ghost.email
-        );
-        let intro_ts = timestamp.map(|t| t.saturating_sub(1));
-        if let Err(e) = self
-            .matrix
-            .send_message_as(&room_id, &intro, None, None, None, &ghost.user_id, intro_ts)
-            .await
-        {
-            warn!(error = %e, "Failed to post room intro line");
-        }
-
         let event_id = self
             .matrix
             .send_message_as(
