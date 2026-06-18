@@ -197,6 +197,14 @@ fn sanitize_for_matrix(html: &str, mode: RenderMode) -> String {
     // ammonia's clean_content_tags is all-or-nothing per tag, so the
     // reply-vs-editorial distinction is made here, by marker.
     let pre = strip_reply_blockquotes(html);
+    // In links mode images are dropped, leaving no sign an email had any. Mark
+    // each loadable image's spot with 🖼️ so the reader sees where images are and
+    // knows to react 🖼️ to load them. (Rich keeps the real images.)
+    let pre = if matches!(mode, RenderMode::Links) {
+        placeholder_remote_images(&pre)
+    } else {
+        pre
+    };
     let builder = match mode {
         RenderMode::Links => &*LINKS_SANITIZER,
         // Plain never reaches here (from_email emits no formatted body for it).
@@ -629,6 +637,35 @@ pub(crate) fn extract_remote_images(html: &str) -> Vec<RemoteImg> {
         }
         i = end;
     }
+    out
+}
+
+/// Replace each remote (`http`/`https`), non-tracker `<img>` with a 🖼️ marker,
+/// and drop other images. Run only in links mode so the reader sees where the
+/// loadable images sit (the marker set matches [`extract_remote_images`], so the
+/// 🖼️ markers correspond 1:1 with what a 🖼️ reaction will load). A wrapping
+/// `<a>` is kept, so a linked image becomes a clickable 🖼️.
+#[must_use]
+fn placeholder_remote_images(html: &str) -> String {
+    let bytes = html.as_bytes();
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0;
+    while let Some(start) = find_ci(&bytes[i..], b"<img", 0).map(|r| i + r) {
+        out.push_str(&html[i..start]);
+        let end = html[start..].find('>').map_or(html.len(), |g| start + g + 1);
+        let tag = &html[start..end];
+        let src = tag_attr(tag, "src").map_or("", |(v, _)| v);
+        let lower = src.trim().to_ascii_lowercase();
+        let remote = lower.starts_with("http://") || lower.starts_with("https://");
+        let is_one = |a: &str| matches!(a.trim(), "1" | "0");
+        let tracker = tag_attr(tag, "width").is_some_and(|(v, _)| is_one(v))
+            || tag_attr(tag, "height").is_some_and(|(v, _)| is_one(v));
+        if remote && !tracker {
+            out.push_str("🖼️");
+        }
+        i = end;
+    }
+    out.push_str(&html[i..]);
     out
 }
 
@@ -1241,7 +1278,7 @@ mod tests {
     #[test]
     fn sanitize_strips_newsletter_whitespace_padding() {
         use super::{RenderMode, sanitize_for_matrix};
-        let html = "<h1><a href=\"https://x/logo\"><img src=\"https://x/l.png\"></a></h1>\
+        let html = "<h1><a href=\"https://x/logo\">  </a></h1>\
             <p>Hello\u{034F} \u{00AD}there</p>\
             \u{2007} \u{2007} \u{2007} \u{2007}\
             <p>Body.</p>";
@@ -1251,9 +1288,27 @@ mod tests {
             "invisible spacers stripped: {out:?}"
         );
         assert!(!out.contains('\u{2007}'), "figure-space ladder collapsed: {out:?}");
-        assert!(!out.contains("<h1>"), "empty logo heading pruned: {out:?}");
+        assert!(!out.contains("<h1>"), "empty heading pruned: {out:?}");
         assert!(out.contains("Hello there"), "real text kept: {out:?}");
         assert!(out.contains("<p>Body.</p>"), "real content kept: {out:?}");
+    }
+
+    #[test]
+    fn links_mode_marks_image_spots_with_placeholder() {
+        use super::{RenderMode, sanitize_for_matrix};
+        let html = "<p>before</p>\
+            <a href=\"https://x/go\"><img src=\"https://x/banner.png\" alt=\"Banner\"></a>\
+            <img src=\"https://t/p.gif\" width=\"1\" height=\"1\">\
+            <p>after</p>";
+        let out = sanitize_for_matrix(html, RenderMode::Links);
+        // Exactly one 🖼️ (the content image); the 1×1 tracker gets none.
+        assert_eq!(out.matches('🖼').count(), 1, "one marker for the content image: {out}");
+        // The wrapping link is kept, so the marker is clickable.
+        assert!(out.contains("href=\"https://x/go\""), "link kept: {out}");
+        assert!(!out.contains("<img"), "no raw img in links mode: {out}");
+        assert!(out.contains("before") && out.contains("after"), "text kept: {out}");
+        // Rich mode does NOT add placeholders (it keeps real images).
+        assert!(!sanitize_for_matrix(html, RenderMode::Rich).contains('🖼'));
     }
 
     #[test]
