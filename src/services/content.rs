@@ -195,9 +195,61 @@ fn sanitize_for_matrix(html: &str, mode: RenderMode) -> String {
         RenderMode::Plain | RenderMode::Rich => &*RICH_SANITIZER,
     };
     let cleaned = builder.clean(&pre).to_string();
+    // Unwrap `<p>` inside `<li>` (purely-presentational in newsletters) so the
+    // list marker and item text render inline instead of on separate lines.
+    let cleaned = unwrap_li_paragraphs(&cleaned);
     // Collapse the `<br>` ladders ProtonMail-style composers leave (empty
     // paragraphs) so the body isn't padded with blank lines.
     collapse_breaks(&cleaned)
+}
+
+/// True if `rest` begins with the tag name `name` (which includes the leading
+/// `<`, e.g. `"<p"` or `"</li"`) as a *complete* tag name — i.e. the next byte
+/// is a tag-name boundary (`>`, `/`, whitespace, or end). ASCII-case-insensitive.
+/// Stops `<p` from matching `<pre>` and `<li` from matching `<link>`.
+fn starts_tag(rest: &str, name: &str) -> bool {
+    rest.len() >= name.len()
+        && rest.as_bytes()[..name.len()].eq_ignore_ascii_case(name.as_bytes())
+        && matches!(
+            rest.as_bytes().get(name.len()),
+            None | Some(b'>' | b'/' | b' ' | b'\t' | b'\n' | b'\r')
+        )
+}
+
+/// Strip `<p>`/`</p>` tags that appear inside an `<li>` (at any nesting depth),
+/// leaving their text content in place. Element renders a block `<p>` on its own
+/// line, so a list item whose text is wrapped in a `<p>` (a common newsletter
+/// pattern) drops the text below its "1."/bullet marker. Removing the wrapper
+/// makes the marker and text render inline. `<p>` outside lists — real paragraph
+/// breaks — is untouched. Runs after ammonia, on normalized, balanced tags.
+#[must_use]
+fn unwrap_li_paragraphs(html: &str) -> String {
+    let bytes = html.as_bytes();
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0;
+    let mut li_depth = 0u32;
+    while i < bytes.len() {
+        if bytes[i] == b'<' {
+            let rest = &html[i..];
+            let tag_end = rest.find('>').map_or(bytes.len(), |g| i + g + 1);
+            if starts_tag(rest, "<li") {
+                li_depth += 1;
+            } else if starts_tag(rest, "</li") {
+                li_depth = li_depth.saturating_sub(1);
+            } else if li_depth > 0 && (starts_tag(rest, "<p") || starts_tag(rest, "</p")) {
+                // Drop the whole tag, keep scanning (its text content stays).
+                i = tag_end;
+                continue;
+            }
+            out.push_str(&html[i..tag_end]);
+            i = tag_end;
+        } else {
+            let ch = html[i..].chars().next().unwrap_or(' ');
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
 }
 
 /// Remove quoted-REPLY blockquotes (the client's wrapper around the prior
@@ -853,6 +905,44 @@ mod tests {
         assert_eq!(collapse_breaks("1234<br><br><br><br>"), "1234");
         assert_eq!(collapse_breaks("a<br>\n<br>\n<br>\n<br>b"), "a<br><br>b");
         assert_eq!(collapse_breaks("<p>hi</p>"), "<p>hi</p>");
+    }
+
+    #[test]
+    fn unwrap_li_paragraphs_keeps_marker_and_text_inline() {
+        use super::unwrap_li_paragraphs;
+        // The newsletter pattern: each list item's text wrapped in a block <p>.
+        let html = "<ol><li>\n<p>Using AI to improve design systems</p>\n</li>\
+                    <li><p>Making better products</p></li></ol>";
+        let out = unwrap_li_paragraphs(html);
+        assert!(
+            !out.contains("<p>") && !out.contains("</p>"),
+            "paragraphs inside list items must be unwrapped: {out}"
+        );
+        assert!(out.contains("<li>") && out.contains("Using AI to improve design systems"));
+        // A <p> OUTSIDE any list is a real paragraph break — leave it alone.
+        let para = "<p>intro</p><ol><li><p>one</p></li></ol><p>outro</p>";
+        let out = unwrap_li_paragraphs(para);
+        assert!(out.starts_with("<p>intro</p>"), "outer <p> kept: {out}");
+        assert!(out.ends_with("<p>outro</p>"), "outer <p> kept: {out}");
+        assert!(!out.contains("<li><p>"), "li <p> dropped: {out}");
+        // <pre> must not be mistaken for <p>, even inside an <li>.
+        let pre = "<li><pre>code</pre></li>";
+        assert_eq!(unwrap_li_paragraphs(pre), pre);
+    }
+
+    #[test]
+    fn full_pipeline_inlines_styled_list_item_paragraphs() {
+        use super::{RenderMode, sanitize_for_matrix};
+        // Verbatim shape from a real newsletter: <p style="…"> inside each <li>.
+        let html = "<ol style=\"color:#000\">\
+            <li style=\"font-size:16px\"><p style=\"font-size:16px\">Using AI to improve design systems</p></li>\
+            <li style=\"font-size:16px\"><p style=\"font-size:16px\">Making better products</p></li></ol>";
+        let out = sanitize_for_matrix(html, RenderMode::Links);
+        assert!(
+            out.contains("<li>Using AI to improve design systems</li>"),
+            "marker and text must end up inline (no inner <p>): {out}"
+        );
+        assert!(!out.contains("<p>"), "list-item paragraphs unwrapped: {out}");
     }
 
     #[test]
