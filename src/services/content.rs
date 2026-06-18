@@ -195,12 +195,197 @@ fn sanitize_for_matrix(html: &str, mode: RenderMode) -> String {
         RenderMode::Plain | RenderMode::Rich => &*RICH_SANITIZER,
     };
     let cleaned = builder.clean(&pre).to_string();
+    // Drop invisible "preheader spacer" code points (combining grapheme joiner,
+    // soft hyphen, zero-widths) newsletters pad with — they're invisible but
+    // count as text, so they render as blank lines and keep wrapper elements
+    // from looking empty to the pruner below.
+    let cleaned = strip_invisibles(&cleaned);
     // Unwrap `<p>` inside `<li>` (purely-presentational in newsletters) so the
     // list marker and item text render inline instead of on separate lines.
     let cleaned = unwrap_li_paragraphs(&cleaned);
+    // Remove wrapper elements left empty once images/spacers are gone (e.g. a
+    // logo `<h1><a><img></a></h1>` becomes an empty heading in Links mode) so
+    // they don't render as tall blank gaps.
+    let cleaned = prune_empty_elements(&cleaned);
+    // Fold the whitespace/`&nbsp;` filler ladders newsletters leave between
+    // blocks down to a single space (a lone `&nbsp;`, e.g. around a button
+    // label, is left intact).
+    let cleaned = collapse_blank_runs(&cleaned);
     // Collapse the `<br>` ladders ProtonMail-style composers leave (empty
     // paragraphs) so the body isn't padded with blank lines.
     collapse_breaks(&cleaned)
+}
+
+/// Length of one "blank unit" at the start of `s`: a single ASCII-whitespace
+/// byte, a U+00A0 char, or one `&nbsp;`/`&#160;`/`&#xa0;` entity. `None` if `s`
+/// doesn't start with blank content.
+fn blank_unit_len(s: &str) -> Option<usize> {
+    // Any Unicode whitespace (ASCII spaces/newlines, U+00A0 no-break, U+2007
+    // figure space and the other Zs spaces newsletters pad with) is one unit.
+    if let Some(c) = s.chars().next().filter(|c| c.is_whitespace()) {
+        return Some(c.len_utf8());
+    }
+    ["&nbsp;", "&#160;", "&#xA0;", "&#xa0;"]
+        .into_iter()
+        .find(|ent| s.starts_with(ent))
+        .map(str::len)
+}
+
+/// Collapse runs of 2+ consecutive blank units (whitespace and `&nbsp;`) to a
+/// single space, leaving a lone blank unit verbatim. Kills the filler ladders
+/// newsletters pad with while preserving intentional single `&nbsp;` spacing.
+#[must_use]
+fn collapse_blank_runs(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        if let Some(first) = blank_unit_len(&s[i..]) {
+            let mut j = i + first;
+            let mut count = 1;
+            while let Some(n) = blank_unit_len(&s[j..]) {
+                j += n;
+                count += 1;
+            }
+            if count >= 2 {
+                out.push(' ');
+            } else {
+                out.push_str(&s[i..j]);
+            }
+            i = j;
+        } else {
+            let ch = s[i..].chars().next().unwrap_or(' ');
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+/// Invisible/zero-width code points newsletters use as "preheader spacers" to
+/// pad the inbox preview. They show nothing but count as text, so a line of them
+/// renders as a blank line and a wrapper full of them looks non-empty. Stripped
+/// from both bodies. Directional marks (U+200E/200F) are deliberately NOT here —
+/// removing those can corrupt legitimate RTL text.
+const INVISIBLE_CHARS: &[char] = &[
+    '\u{00AD}', // soft hyphen
+    '\u{034F}', // combining grapheme joiner
+    '\u{200B}', // zero width space
+    '\u{200C}', // zero width non-joiner
+    '\u{200D}', // zero width joiner
+    '\u{2060}', // word joiner
+    '\u{FEFF}', // zero width no-break space (BOM)
+    '\u{180E}', // mongolian vowel separator
+];
+
+/// Remove the invisible padding code points above. Cheap no-op when none present.
+#[must_use]
+fn strip_invisibles(s: &str) -> String {
+    if s.contains(INVISIBLE_CHARS) {
+        s.chars().filter(|c| !INVISIBLE_CHARS.contains(c)).collect()
+    } else {
+        s.to_owned()
+    }
+}
+
+/// Wrapper elements that are pure chrome when they hold no visible content, so
+/// they're safe to drop entirely if empty. Excludes void/meaningful-empty tags
+/// (`br`, `hr`, `img`).
+const PRUNABLE_WHEN_EMPTY: &[&str] = &[
+    "a", "h1", "h2", "h3", "h4", "h5", "h6", "p", "span", "div", "b", "i", "u",
+    "strong", "em", "s", "del", "sub", "sup", "code", "blockquote", "ul", "ol",
+    "li", "pre", "details", "summary", "caption",
+];
+
+/// Drop wrapper elements whose content is "blank" (only whitespace and `&nbsp;`),
+/// iterating to a fixed point so nested empties collapse outward — an empty
+/// `<a>` inside an `<h1>` leaves the `<h1>` blank, which the next pass removes.
+#[must_use]
+fn prune_empty_elements(html: &str) -> String {
+    let mut cur = html.to_owned();
+    for _ in 0..32 {
+        let (next, changed) = prune_empty_once(&cur);
+        if !changed {
+            return next;
+        }
+        cur = next;
+    }
+    cur
+}
+
+/// One left-to-right pass removing every empty prunable element it finds.
+/// Returns the rewritten string and whether anything was removed.
+fn prune_empty_once(html: &str) -> (String, bool) {
+    let bytes = html.as_bytes();
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0;
+    let mut changed = false;
+    while i < bytes.len() {
+        if bytes[i] != b'<' {
+            let ch = html[i..].chars().next().unwrap_or(' ');
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        let rest = &html[i..];
+        let Some(gt_rel) = rest.find('>') else {
+            out.push_str(rest);
+            break;
+        };
+        let open_end = i + gt_rel + 1;
+        if let Some(name) = prunable_open_name(rest) {
+            let after_blank = skip_blank_content(html, open_end);
+            let tail = &html[after_blank..];
+            let close = format!("</{name}");
+            let matches_close = tail.len() >= close.len()
+                && tail.as_bytes()[..close.len()].eq_ignore_ascii_case(close.as_bytes())
+                && matches!(
+                    tail.as_bytes().get(close.len()),
+                    Some(b'>' | b'/' | b' ' | b'\t' | b'\n' | b'\r')
+                );
+            if matches_close {
+                if let Some(cgt) = tail.find('>') {
+                    i = after_blank + cgt + 1; // skip the whole empty element
+                    changed = true;
+                    continue;
+                }
+            }
+        }
+        // Not an empty prunable: emit just this tag and keep scanning its content
+        // (inner empties are removed in the same pass; the outer, if it becomes
+        // empty as a result, is caught on the next iteration).
+        out.push_str(&html[i..open_end]);
+        i = open_end;
+    }
+    (out, changed)
+}
+
+/// If `rest` begins with an open tag `<name …>` of a prunable element (not a
+/// close tag), return that name. Boundary-checked so `<span` matches but
+/// `<summary` isn't mistaken for `<sub`/`<s`, etc.
+fn prunable_open_name(rest: &str) -> Option<&'static str> {
+    if rest.starts_with("</") {
+        return None;
+    }
+    PRUNABLE_WHEN_EMPTY.iter().copied().find(|n| starts_tag(rest, &format!("<{n}")))
+}
+
+/// Advance past "blank" content from byte `k`: ASCII/Unicode whitespace, the
+/// non-breaking space char (U+00A0), and `&nbsp;`/`&#160;`/`&#xa0;` entities.
+fn skip_blank_content(html: &str, mut k: usize) -> usize {
+    loop {
+        let start = k;
+        while let Some(c) = html[k..].chars().next().filter(|c| c.is_whitespace()) {
+            k += c.len_utf8();
+        }
+        for ent in ["&nbsp;", "&#160;", "&#xA0;", "&#xa0;"] {
+            if html[k..].starts_with(ent) {
+                k += ent.len();
+            }
+        }
+        if k == start {
+            return k;
+        }
+    }
 }
 
 /// True if `rest` begins with the tag name `name` (which includes the leading
@@ -420,10 +605,7 @@ fn matrix_sanitizer(links_mode: bool) -> Builder<'static> {
 /// naive newline-run collapse would leave intact.
 #[must_use]
 fn normalize_plain(s: &str) -> String {
-    let filtered: String = s
-        .chars()
-        .filter(|&c| c != '\u{00AD}' && c != '\u{200B}' && c != '\u{FEFF}')
-        .collect();
+    let filtered = strip_invisibles(s);
     let mut out = String::with_capacity(filtered.len());
     let mut blank_run = 0u32;
     for line in filtered.lines() {
@@ -905,6 +1087,47 @@ mod tests {
         assert_eq!(collapse_breaks("1234<br><br><br><br>"), "1234");
         assert_eq!(collapse_breaks("a<br>\n<br>\n<br>\n<br>b"), "a<br><br>b");
         assert_eq!(collapse_breaks("<p>hi</p>"), "<p>hi</p>");
+    }
+
+    #[test]
+    fn collapse_blank_runs_folds_filler_keeps_single_nbsp() {
+        use super::collapse_blank_runs;
+        // Figure-space (U+2007) ladder interleaved with spaces -> one space.
+        assert_eq!(collapse_blank_runs("a\u{2007} \u{2007} \u{2007}b"), "a b");
+        // A lone &nbsp; (e.g. around a button label) is preserved verbatim.
+        assert_eq!(collapse_blank_runs("x&nbsp;y"), "x&nbsp;y");
+        // A run of &nbsp; is folded.
+        assert_eq!(collapse_blank_runs("p&nbsp;&nbsp;&nbsp;q"), "p q");
+        // Single ASCII space untouched.
+        assert_eq!(collapse_blank_runs("a b"), "a b");
+    }
+
+    #[test]
+    fn prune_empty_elements_drops_blank_wrappers_not_content() {
+        use super::prune_empty_elements;
+        // Empty logo heading: <h1><a><img></a></h1> after image drop -> gone.
+        assert_eq!(prune_empty_elements("<h1><a href=\"u\"> </a></h1>"), "");
+        assert_eq!(prune_empty_elements("<p>keep</p>"), "<p>keep</p>");
+        // <br> is meaningful-empty: a paragraph holding only <br> is NOT pruned.
+        assert_eq!(prune_empty_elements("<p><br></p>"), "<p><br></p>");
+    }
+
+    #[test]
+    fn sanitize_strips_newsletter_whitespace_padding() {
+        use super::{RenderMode, sanitize_for_matrix};
+        let html = "<h1><a href=\"https://x/logo\"><img src=\"https://x/l.png\"></a></h1>\
+            <p>Hello\u{034F} \u{00AD}there</p>\
+            \u{2007} \u{2007} \u{2007} \u{2007}\
+            <p>Body.</p>";
+        let out = sanitize_for_matrix(html, RenderMode::Links);
+        assert!(
+            !out.contains('\u{034F}') && !out.contains('\u{00AD}'),
+            "invisible spacers stripped: {out:?}"
+        );
+        assert!(!out.contains('\u{2007}'), "figure-space ladder collapsed: {out:?}");
+        assert!(!out.contains("<h1>"), "empty logo heading pruned: {out:?}");
+        assert!(out.contains("Hello there"), "real text kept: {out:?}");
+        assert!(out.contains("<p>Body.</p>"), "real content kept: {out:?}");
     }
 
     #[test]
