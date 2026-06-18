@@ -824,6 +824,43 @@ impl MatrixClient {
         Ok(resp.event_id.to_string())
     }
 
+    /// Edit an existing event in place via `m.replace`. The Matrix spec requires
+    /// the replacement to be authored by the ORIGINAL event's sender, so
+    /// `sender_id` here is the contact ghost that posted the message (not the
+    /// human user). Used to re-render a bridged email with its images inlined.
+    pub async fn send_edit_as(
+        &self,
+        room_id: &str,
+        target_event_id: &str,
+        body_text: &str,
+        formatted_body: &str,
+        sender_id: &str,
+    ) -> Result<String> {
+        let room_id = RoomId::parse(room_id).context("Invalid Room ID")?;
+        let target = EventId::parse(target_event_id).context("Invalid target Event ID")?;
+
+        let build = || -> Result<SendMessageRequest> {
+            let content = RoomMessageEventContent::text_html(body_text, formatted_body)
+                .make_replacement(
+                    matrix_sdk::ruma::events::room::message::ReplacementMetadata::new(
+                        target.clone(),
+                        None,
+                    ),
+                );
+            Ok(SendMessageRequest::new(
+                room_id.clone(),
+                Self::txn_id().into(),
+                &matrix_sdk::ruma::events::AnyMessageLikeEventContent::RoomMessage(content),
+            )?)
+        };
+
+        let sender = UserId::parse(sender_id)?;
+        let resp = self
+            .send_as_ghost_joining(room_id.as_str(), sender_id, &sender, None, build)
+            .await?;
+        Ok(resp.event_id.to_string())
+    }
+
     /// Send a ghost request, self-healing the common "ghost not joined to the
     /// room" 403. A ghost is joined to its contact room once at creation, but a
     /// swallowed join error (or a room from an earlier run) can leave it absent,

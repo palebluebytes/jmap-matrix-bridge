@@ -149,6 +149,14 @@ impl EmailBody {
     }
 }
 
+/// The email's best HTML representation (htmlBody, before any Matrix
+/// sanitization), for callers that need the raw image URLs — e.g. on-demand
+/// image loading. `None` for a plain-text-only email.
+#[must_use]
+pub(crate) fn original_html(email: &Email) -> Option<String> {
+    EmailBody::html_candidate(email).map(|(html, _)| html)
+}
+
 /// Heuristic: does this text contain real HTML markup (a recognizable tag)?
 /// Deliberately conservative so plain prose with a stray `<` or `<3` is not
 /// misclassified.
@@ -532,6 +540,124 @@ fn collapse_breaks(s: &str) -> String {
         out.truncate(out.len() - BR.len());
     }
     out.trim().to_owned()
+}
+
+/// A remote `<img>` referenced by an email body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RemoteImg {
+    /// The `src` value exactly as it appears in the HTML (entities intact), used
+    /// both as the rewrite key and — once entity-decoded — as the fetch URL.
+    pub url: String,
+    /// A 1×1 (or 0-sized) spacer/tracking pixel, identified by its width/height
+    /// attribute. Callers skip these so opting in doesn't load beacons.
+    pub is_tracker: bool,
+}
+
+/// Decode the handful of HTML entities that appear inside an `src` URL (chiefly
+/// `&amp;`) so the value can be fetched over HTTP.
+#[must_use]
+pub(crate) fn decode_src_entities(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&#38;", "&")
+        .replace("&#x26;", "&")
+}
+
+/// Find attribute `name`'s value within a single tag string (e.g. `<img …>`),
+/// returning `(value, range-of-value-in-`tag`)`. Handles double/single/unquoted
+/// values and requires a tag-name boundary before `name` so `src` doesn't match
+/// `data-src`/`srcset`. ASCII-case-insensitive on the attribute name.
+fn tag_attr<'a>(tag: &'a str, name: &str) -> Option<(&'a str, std::ops::Range<usize>)> {
+    let bytes = tag.as_bytes();
+    let mut search = 0;
+    while let Some(rel) = find_ci(&bytes[search..], name.as_bytes(), 0) {
+        let pos = search + rel;
+        let before_ok = pos == 0
+            || matches!(bytes[pos - 1], b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' | b'/');
+        let mut k = pos + name.len();
+        while k < bytes.len() && matches!(bytes[k], b' ' | b'\t') {
+            k += 1;
+        }
+        if before_ok && k < bytes.len() && bytes[k] == b'=' {
+            k += 1;
+            while k < bytes.len() && matches!(bytes[k], b' ' | b'\t' | b'\n' | b'\r') {
+                k += 1;
+            }
+            let (start, quote) = match bytes.get(k) {
+                Some(b'"') => (k + 1, Some('"')),
+                Some(b'\'') => (k + 1, Some('\'')),
+                _ => (k, None),
+            };
+            let end = match quote {
+                Some(q) => start + tag[start..].find(q).unwrap_or(tag.len() - start),
+                None => {
+                    start
+                        + tag[start..]
+                            .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
+                            .unwrap_or(tag.len() - start)
+                }
+            };
+            return Some((&tag[start..end], start..end));
+        }
+        search = pos + name.len();
+    }
+    None
+}
+
+/// Collect remote (`http`/`https`) `<img>` sources from an email body, flagging
+/// 1×1 tracking pixels. De-duplicated by `src`, preserving first-seen order.
+#[must_use]
+pub(crate) fn extract_remote_images(html: &str) -> Vec<RemoteImg> {
+    let bytes = html.as_bytes();
+    let mut out: Vec<RemoteImg> = Vec::new();
+    let mut i = 0;
+    while let Some(start) = find_ci(&bytes[i..], b"<img", 0).map(|r| i + r) {
+        let end = html[start..].find('>').map_or(html.len(), |g| start + g + 1);
+        let tag = &html[start..end];
+        if let Some((src, _)) = tag_attr(tag, "src") {
+            let lower = src.trim().to_ascii_lowercase();
+            if (lower.starts_with("http://") || lower.starts_with("https://"))
+                && !out.iter().any(|r| r.url == src)
+            {
+                let is_one = |a: &str| matches!(a.trim(), "1" | "0");
+                let is_tracker = tag_attr(tag, "width").is_some_and(|(v, _)| is_one(v))
+                    || tag_attr(tag, "height").is_some_and(|(v, _)| is_one(v));
+                out.push(RemoteImg {
+                    url: src.to_owned(),
+                    is_tracker,
+                });
+            }
+        }
+        i = end;
+    }
+    out
+}
+
+/// Rewrite each `<img>` whose `src` is a key in `url_to_mxc` to the mapped
+/// `mxc://` URI, then run the Rich sanitizer (which keeps `<img>` and allows
+/// only `mxc://` sources, so mapped images survive and any unmapped remote ones
+/// are dropped). Used to re-render an email in place once its images are loaded.
+#[must_use]
+pub(crate) fn render_inline_images(html: &str, url_to_mxc: &HashMap<String, String>) -> String {
+    let bytes = html.as_bytes();
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0;
+    while let Some(start) = find_ci(&bytes[i..], b"<img", 0).map(|r| i + r) {
+        out.push_str(&html[i..start]);
+        let end = html[start..].find('>').map_or(html.len(), |g| start + g + 1);
+        let tag = &html[start..end];
+        match tag_attr(tag, "src").and_then(|(src, range)| url_to_mxc.get(src).map(|mxc| (range, mxc)))
+        {
+            Some((range, mxc)) => {
+                out.push_str(&tag[..range.start]);
+                out.push_str(mxc);
+                out.push_str(&tag[range.end..]);
+            }
+            None => out.push_str(tag),
+        }
+        i = end;
+    }
+    out.push_str(&html[i..]);
+    sanitize_for_matrix(&out, RenderMode::Rich)
 }
 
 static RICH_SANITIZER: LazyLock<Builder<'static>> = LazyLock::new(|| matrix_sanitizer(false));
@@ -1128,6 +1254,42 @@ mod tests {
         assert!(!out.contains("<h1>"), "empty logo heading pruned: {out:?}");
         assert!(out.contains("Hello there"), "real text kept: {out:?}");
         assert!(out.contains("<p>Body.</p>"), "real content kept: {out:?}");
+    }
+
+    #[test]
+    fn extract_remote_images_finds_remotes_and_flags_trackers() {
+        use super::extract_remote_images;
+        let html = "<img src=\"https://x/logo.png\" width=\"200\">\
+            <img alt=\"px\" src=\"https://t/track.gif\" width=\"1\" height=\"1\">\
+            <img src=\"https://x/logo.png\">\
+            <img src=\"cid:inline\"><img data-src=\"https://x/lazy.png\">";
+        let imgs = extract_remote_images(html);
+        // Two unique remote http(s) srcs; cid: and data-src ignored; deduped.
+        assert_eq!(imgs.len(), 2, "{imgs:?}");
+        assert_eq!(imgs[0].url, "https://x/logo.png");
+        assert!(!imgs[0].is_tracker);
+        assert_eq!(imgs[1].url, "https://t/track.gif");
+        assert!(imgs[1].is_tracker, "1x1 must be flagged");
+    }
+
+    #[test]
+    fn render_inline_images_rewrites_mapped_and_drops_unmapped() {
+        use super::{RemoteImg, decode_src_entities, extract_remote_images, render_inline_images};
+        use std::collections::HashMap;
+        let html = "<p>hi</p><img src=\"https://x/a.png?u=1&amp;v=2\">\
+            <img src=\"https://x/b.png\">";
+        // Only a.png is "loaded" (mapped to mxc); b.png stays remote.
+        let mut map = HashMap::new();
+        map.insert("https://x/a.png?u=1&amp;v=2".to_owned(), "mxc://hs/aaa".to_owned());
+        let out = render_inline_images(html, &map);
+        assert!(out.contains("mxc://hs/aaa"), "mapped img inlined: {out}");
+        assert!(!out.contains("https://x/b.png"), "unmapped remote img dropped: {out}");
+        assert!(out.contains("<p>hi</p>"), "text kept: {out}");
+        // Entity decode turns the rewrite key into a fetchable URL.
+        assert_eq!(decode_src_entities("https://x/a.png?u=1&amp;v=2"), "https://x/a.png?u=1&v=2");
+        // The extractor's key matches the map key exactly (so rewrite lands).
+        let imgs: Vec<RemoteImg> = extract_remote_images(html);
+        assert!(map.contains_key(&imgs[0].url));
     }
 
     #[test]

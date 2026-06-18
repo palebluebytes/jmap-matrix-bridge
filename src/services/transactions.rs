@@ -96,6 +96,32 @@ pub async fn process_transaction(
                 if sender_id.starts_with("@_jmap_") {
                     continue;
                 }
+                // A 🖼️ reaction from the user on a bridged email loads that one
+                // email's images and edits the message in place (per-message,
+                // opt-in — see services::images). Image fetch + upload is slow
+                // network I/O, so run it detached rather than blocking the
+                // transaction ACK (a homeserver retry would dedupe anyway).
+                if let matrix_sdk::ruma::events::AnyMessageLikeEvent::Reaction(reaction) = &e
+                    && let Some(annotation) = reaction.as_original().map(|ev| &ev.content.relates_to)
+                    && crate::services::images::is_load_images_reaction(&annotation.key)
+                {
+                    if let Some(rm_id) = room_id.as_deref() {
+                        let state = state.clone();
+                        let sender_id = sender_id.clone();
+                        let rm_id = rm_id.to_owned();
+                        let target = annotation.event_id.to_string();
+                        tokio::spawn(async move {
+                            if let Err(err) = crate::services::images::handle_load_images_reaction(
+                                &state, &sender_id, &rm_id, &target,
+                            )
+                            .await
+                            {
+                                error!(%sender_id, %rm_id, error = %err, "Image-load reaction failed");
+                            }
+                        });
+                    }
+                    continue;
+                }
                 if let matrix_sdk::ruma::events::AnyMessageLikeEvent::RoomMessage(message_event) = e
                     && let Some(content) = message_event.as_original().map(|ev| &ev.content)
                 {
