@@ -25,6 +25,36 @@ fn ghost_display_name(name: Option<&str>, email: &str) -> String {
         .map_or_else(|| email.to_owned(), |n| format!("{n} ({email})"))
 }
 
+/// The recipient address an inbound email was delivered to — used to show which
+/// of the user's aliases (e.g. `…@palebluebytes.space` vs `…@palebluebytes.xyz`)
+/// it reached. Prefers a `To`/`Cc` address sharing the user's localpart (so the
+/// real alias is picked even when the user has several), then the first `To`,
+/// then the user's own address.
+fn recipient_alias(email: &Email, own_email: Option<&str>) -> Option<String> {
+    let to: Vec<&str> = email.to().unwrap_or(&[]).iter().map(EmailAddress::email).collect();
+    let cc: Vec<&str> = email.cc().unwrap_or(&[]).iter().map(EmailAddress::email).collect();
+    choose_recipient(&to, &cc, own_email)
+}
+
+/// Pure core of [`recipient_alias`]: pick the `To`/`Cc` address sharing the
+/// user's localpart, else the first `To`, else the user's own address.
+fn choose_recipient(to: &[&str], cc: &[&str], own_email: Option<&str>) -> Option<String> {
+    if let Some(local) = own_email.and_then(|e| e.split('@').next()) {
+        for addr in to.iter().chain(cc.iter()) {
+            if addr
+                .split('@')
+                .next()
+                .is_some_and(|l| l.eq_ignore_ascii_case(local))
+            {
+                return Some((*addr).to_owned());
+            }
+        }
+    }
+    to.first()
+        .map(|a| (*a).to_owned())
+        .or_else(|| own_email.map(str::to_owned))
+}
+
 impl JmapPoller {
     #[instrument(skip(self), fields(user = %self.matrix_user_id))]
     #[allow(clippy::too_many_lines)]
@@ -167,6 +197,8 @@ impl JmapPoller {
             Property::ThreadId,
             Property::Subject,
             Property::From,
+            Property::To,
+            Property::Cc,
             Property::ReceivedAt,
             Property::TextBody,
             Property::HtmlBody,
@@ -360,8 +392,13 @@ impl JmapPoller {
         // TOPIC below — both are state events Element renders as its grey
         // "changed the room name / topic" tiles at the top of the room. No
         // separate intro MESSAGE is posted: it would be redundant with the topic
-        // tile and, carrying a send timestamp, would disturb date ordering.
-        let topic = format!("Email with {} about {room_subject}", ghost.email);
+        // tile and, carrying a send timestamp, would disturb date ordering. The
+        // topic shows from→to, including which of the user's aliases received it.
+        let own_email = self.store.get_user_email(&self.matrix_user_id).await?;
+        let topic = match recipient_alias(email, own_email.as_deref()) {
+            Some(to) => format!("Email from {} to {to}", ghost.email),
+            None => format!("Email from {}", ghost.email),
+        };
         if let Err(e) = self.matrix.set_room_topic(&room_id, &topic).await {
             warn!(error = %e, "Failed to set thread room topic");
         }
@@ -439,7 +476,34 @@ impl JmapPoller {
 
 #[cfg(test)]
 mod tests {
-    use super::{ghost_display_name, should_skip_inbound};
+    use super::{choose_recipient, ghost_display_name, should_skip_inbound};
+
+    #[test]
+    fn recipient_picks_the_alias_that_received_the_mail() {
+        // The user has two aliases (same localpart). Whichever the mail used in
+        // To is the one shown — picked by matching the user's localpart.
+        let own = Some("thomas@palebluebytes.space");
+        assert_eq!(
+            choose_recipient(&["thomas@palebluebytes.xyz"], &[], own).as_deref(),
+            Some("thomas@palebluebytes.xyz")
+        );
+        assert_eq!(
+            choose_recipient(&["thomas@palebluebytes.space"], &[], own).as_deref(),
+            Some("thomas@palebluebytes.space")
+        );
+        // User in Cc, a list in To -> the user's alias still wins.
+        assert_eq!(
+            choose_recipient(&["list@news.com"], &["thomas@palebluebytes.xyz"], own).as_deref(),
+            Some("thomas@palebluebytes.xyz")
+        );
+        // No localpart match -> first To.
+        assert_eq!(
+            choose_recipient(&["someone@else.com"], &[], own).as_deref(),
+            Some("someone@else.com")
+        );
+        // No recipients at all -> fall back to the user's own address.
+        assert_eq!(choose_recipient(&[], &[], own).as_deref(), own);
+    }
 
     #[test]
     fn display_name_combines_name_and_email() {
