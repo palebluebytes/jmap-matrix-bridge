@@ -89,7 +89,7 @@ async fn inline_email_images(
 ) -> Result<()> {
     let candidates: Vec<_> = content::extract_remote_images(html)
         .into_iter()
-        .filter(|img| !img.is_tracker)
+        .filter(|img| !img.is_decorative)
         .take(MAX_IMAGES)
         .collect();
     if candidates.is_empty() {

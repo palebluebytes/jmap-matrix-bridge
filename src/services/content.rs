@@ -556,9 +556,27 @@ pub(crate) struct RemoteImg {
     /// The `src` value exactly as it appears in the HTML (entities intact), used
     /// both as the rewrite key and — once entity-decoded — as the fetch URL.
     pub url: String,
-    /// A 1×1 (or 0-sized) spacer/tracking pixel, identified by its width/height
-    /// attribute. Callers skip these so opting in doesn't load beacons.
-    pub is_tracker: bool,
+    /// Decorative/chrome by its width/height: a 1×1 (or 0/2) tracking pixel or
+    /// thin spacer, or a small square icon (social/footer icons etc.). Callers
+    /// skip these so opting in doesn't load beacons or clutter with tiny icons.
+    pub is_decorative: bool,
+}
+
+/// Parse an `<img>` numeric dimension attribute (`width`/`height`) to pixels.
+fn img_dimension(tag: &str, name: &str) -> Option<u32> {
+    tag_attr(tag, name).and_then(|(v, _)| v.trim().parse::<u32>().ok())
+}
+
+/// Decorative chrome (not worth a marker or a fetch): a tracker/spacer (a
+/// dimension ≤ 2px) or a small square icon (both dimensions present and ≤ 48px,
+/// e.g. social/footer icons). Images without numeric dimensions are treated as
+/// content (not decorative), so anything sized in CSS only still shows.
+fn is_decorative_img(tag: &str) -> bool {
+    let w = img_dimension(tag, "width");
+    let h = img_dimension(tag, "height");
+    let spacer = w.is_some_and(|v| v <= 2) || h.is_some_and(|v| v <= 2);
+    let tiny_icon = matches!((w, h), (Some(a), Some(b)) if a <= 48 && b <= 48);
+    spacer || tiny_icon
 }
 
 /// Decode the handful of HTML entities that appear inside an `src` URL (chiefly
@@ -612,7 +630,8 @@ fn tag_attr<'a>(tag: &'a str, name: &str) -> Option<(&'a str, std::ops::Range<us
 }
 
 /// Collect remote (`http`/`https`) `<img>` sources from an email body, flagging
-/// 1×1 tracking pixels. De-duplicated by `src`, preserving first-seen order.
+/// decorative chrome (trackers/spacers and tiny icons — see [`is_decorative_img`]).
+/// De-duplicated by `src`, preserving first-seen order.
 #[must_use]
 pub(crate) fn extract_remote_images(html: &str) -> Vec<RemoteImg> {
     let bytes = html.as_bytes();
@@ -626,12 +645,9 @@ pub(crate) fn extract_remote_images(html: &str) -> Vec<RemoteImg> {
             if (lower.starts_with("http://") || lower.starts_with("https://"))
                 && !out.iter().any(|r| r.url == src)
             {
-                let is_one = |a: &str| matches!(a.trim(), "1" | "0");
-                let is_tracker = tag_attr(tag, "width").is_some_and(|(v, _)| is_one(v))
-                    || tag_attr(tag, "height").is_some_and(|(v, _)| is_one(v));
                 out.push(RemoteImg {
                     url: src.to_owned(),
-                    is_tracker,
+                    is_decorative: is_decorative_img(tag),
                 });
             }
         }
@@ -657,10 +673,7 @@ fn placeholder_remote_images(html: &str) -> String {
         let src = tag_attr(tag, "src").map_or("", |(v, _)| v);
         let lower = src.trim().to_ascii_lowercase();
         let remote = lower.starts_with("http://") || lower.starts_with("https://");
-        let is_one = |a: &str| matches!(a.trim(), "1" | "0");
-        let tracker = tag_attr(tag, "width").is_some_and(|(v, _)| is_one(v))
-            || tag_attr(tag, "height").is_some_and(|(v, _)| is_one(v));
-        if remote && !tracker {
+        if remote && !is_decorative_img(tag) {
             out.push_str("🖼️");
         }
         i = end;
@@ -1299,9 +1312,11 @@ mod tests {
         let html = "<p>before</p>\
             <a href=\"https://x/go\"><img src=\"https://x/banner.png\" alt=\"Banner\"></a>\
             <img src=\"https://t/p.gif\" width=\"1\" height=\"1\">\
+            <img src=\"https://x/icon.png\" width=\"24\" height=\"24\">\
             <p>after</p>";
         let out = sanitize_for_matrix(html, RenderMode::Links);
-        // Exactly one 🖼️ (the content image); the 1×1 tracker gets none.
+        // Exactly one 🖼️ (the content banner); the 1×1 tracker and the 24×24
+        // decorative icon get none.
         assert_eq!(out.matches('🖼').count(), 1, "one marker for the content image: {out}");
         // The wrapping link is kept, so the marker is clickable.
         assert!(out.contains("href=\"https://x/go\""), "link kept: {out}");
@@ -1312,19 +1327,20 @@ mod tests {
     }
 
     #[test]
-    fn extract_remote_images_finds_remotes_and_flags_trackers() {
+    fn extract_remote_images_finds_remotes_and_flags_decorative() {
         use super::extract_remote_images;
-        let html = "<img src=\"https://x/logo.png\" width=\"200\">\
+        let html = "<img src=\"https://x/hero.png\" width=\"600\">\
             <img alt=\"px\" src=\"https://t/track.gif\" width=\"1\" height=\"1\">\
-            <img src=\"https://x/logo.png\">\
+            <img src=\"https://x/icon.png\" width=\"24\" height=\"24\">\
+            <img src=\"https://x/hero.png\">\
             <img src=\"cid:inline\"><img data-src=\"https://x/lazy.png\">";
         let imgs = extract_remote_images(html);
-        // Two unique remote http(s) srcs; cid: and data-src ignored; deduped.
-        assert_eq!(imgs.len(), 2, "{imgs:?}");
-        assert_eq!(imgs[0].url, "https://x/logo.png");
-        assert!(!imgs[0].is_tracker);
-        assert_eq!(imgs[1].url, "https://t/track.gif");
-        assert!(imgs[1].is_tracker, "1x1 must be flagged");
+        // Three unique remote http(s) srcs; cid: and data-src ignored; deduped.
+        assert_eq!(imgs.len(), 3, "{imgs:?}");
+        assert_eq!(imgs[0].url, "https://x/hero.png");
+        assert!(!imgs[0].is_decorative, "600px-wide hero is content");
+        assert!(imgs[1].is_decorative, "1x1 tracker is decorative");
+        assert!(imgs[2].is_decorative, "24x24 icon is decorative");
     }
 
     #[test]
