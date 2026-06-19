@@ -48,6 +48,19 @@
           packages.jmap-matrix-bridge = bridge;
           packages.default = bridge;
 
+          # Dev shell entered via `nix develop` / `direnv` (see .envrc). Inherits
+          # the package's build inputs + Rust toolchain from crane, then layers on
+          # the tooling AGENTS.md documents plus `gh` for issue-tracker workflows.
+          devShells.default = craneLib.devShell {
+            inputsFrom = [ bridge ];
+            packages = with pkgs; [
+              cargo-nextest
+              bacon
+              just
+              gh
+            ];
+          };
+
           # The email↔Matrix round-trip VM test. nixosTest runs only on the
           # builder's platform, so gate it to x86_64 (the bridge's host).
           checks = lib.optionalAttrs (system == "x86_64-linux") {
