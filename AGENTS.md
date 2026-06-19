@@ -3,6 +3,8 @@
 **Context:** This is a Rust-based Matrix Application Service bridging JMAP email to Matrix rooms.
 **Prime Directive:** You are an autonomous AI entity operating in this repository. You must adhere strictly to the workflows, architectural boundaries, and toolchains defined below. Do not guess commands, and do not ignore environmental constraints.
 
+**Before you start:** read [`CONTEXT.md`](CONTEXT.md) for the domain vocabulary (ghost, puppet, bot, thread, room, space, submission, backfill) and [`docs/adr/`](docs/adr/) for the decisions of record. Use that vocabulary in code, tests, and issues; if your change contradicts an ADR, surface it rather than silently overriding.
+
 ---
 
 ## 1. The Environment: Nix Flake (STRICT BOUNDARY)
