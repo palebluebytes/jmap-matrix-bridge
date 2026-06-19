@@ -24,7 +24,7 @@ jobs:
     name: release-plz
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # full history is required to build the changelog
           # A PAT or GitHub App token (NOT the default GITHUB_TOKEN): the tag this
