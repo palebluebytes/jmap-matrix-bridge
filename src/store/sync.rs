@@ -65,20 +65,25 @@ impl Store {
         Ok(())
     }
 
-    /// Check if a Matrix transaction ID has already been processed.
-    pub async fn is_transaction_processed(&self, txn_id: &str) -> Result<bool> {
-        let record = sqlx::query_scalar::<Sqlite, i64>(
-            "SELECT 1 FROM processed_transactions WHERE txn_id = ?",
-        )
-        .bind(txn_id)
-        .fetch_optional(&self.pool)
-        .await?;
-        Ok(record.is_some())
+    /// Atomically claim a Matrix transaction id for processing. Returns `true`
+    /// if this call inserted the row (the caller now owns processing), `false`
+    /// if it was already present (already processed, or claimed by a concurrent
+    /// retry). Replaces a check-then-act pair so two concurrent deliveries of the
+    /// same txn id can't both process it. (`txn_id` is the table's PRIMARY KEY.)
+    pub async fn claim_transaction(&self, txn_id: &str) -> Result<bool> {
+        let affected =
+            sqlx::query("INSERT OR IGNORE INTO processed_transactions (txn_id) VALUES (?)")
+                .bind(txn_id)
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
+        Ok(affected == 1)
     }
 
-    /// Record a Matrix transaction ID as processed.
-    pub async fn mark_transaction_processed(&self, txn_id: &str) -> Result<()> {
-        sqlx::query("INSERT INTO processed_transactions (txn_id) VALUES (?)")
+    /// Release a previously claimed transaction so the homeserver's retry can
+    /// re-process it (used when processing failed with a transient error).
+    pub async fn unclaim_transaction(&self, txn_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM processed_transactions WHERE txn_id = ?")
             .bind(txn_id)
             .execute(&self.pool)
             .await?;

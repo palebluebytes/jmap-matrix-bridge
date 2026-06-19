@@ -321,10 +321,11 @@ impl JmapPoller {
                 timestamp,
             )
             .await?;
-        let thread_id = email.thread_id().expect("email thread_id must be present");
-        self.store
-            .save_message_mapping(email.id().expect("email id must be present"), &event_id)
-            .await?;
+        let (Some(thread_id), Some(email_id)) = (email.thread_id(), email.id()) else {
+            warn!("JMAP email missing thread_id/id; skipping mapping");
+            return Ok(());
+        };
+        self.store.save_message_mapping(email_id, &event_id).await?;
         // Track the latest bridged event for the thread (used by outbound reply
         // context), even though messages are no longer Matrix-threaded.
         if let Err(e) = self
@@ -356,7 +357,10 @@ impl JmapPoller {
         ghost: &GhostUser,
         body: &EmailBody,
     ) -> Result<()> {
-        let thread_id = email.thread_id().expect("email thread_id must be present");
+        let (Some(thread_id), Some(email_id)) = (email.thread_id(), email.id()) else {
+            warn!("JMAP email missing thread_id/id; skipping new-thread bridging");
+            return Ok(());
+        };
         let subject = email.subject().unwrap_or(NO_SUBJECT);
 
         // One Matrix room per email thread. Lock by thread so two emails of the
@@ -440,9 +444,7 @@ impl JmapPoller {
         self.store
             .save_thread_mapping_atomic(thread_id, &event_id, &room_id, subject)
             .await?;
-        self.store
-            .save_message_mapping(email.id().expect("email id must be present"), &event_id)
-            .await?;
+        self.store.save_message_mapping(email_id, &event_id).await?;
         handle_attachments(
             &self.client,
             &self.matrix,
