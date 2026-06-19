@@ -1,4 +1,22 @@
+# Rust / Cargo
 target/
 **/*.rs.bk
+
+# Nix build outputs
+result
+result-*
+
+# direnv (local dev shell cache + local overrides)
+.direnv/
+.envrc.local
+
+# Bacon background check log (see AGENTS.md inner loop)
+bacon.log
+
+# SQLite runtime database + WAL sidecars (bridge state; sqlx-data.json stays tracked)
 bridge.db
+bridge.db-shm
+bridge.db-wal
+
+# Generated appservice registration (may contain tokens)
 registration.yaml
