@@ -37,6 +37,10 @@ tower = { version = "0.5", features = ["util"] }
 
 jmap-client = "0.4"
 base64 = "0.22"
+# Constant-time hs_token comparison (auth middleware).
+subtle = "2"
+# Percent-encode untrusted values into the JMAP download URL template.
+percent-encoding = "2"
 futures-util = "0.3"
 bytes = "1.8"
 rand = "0.10"
