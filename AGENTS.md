@@ -54,7 +54,7 @@ When generating or refactoring code, you MUST adhere to the following constraint
 
 ### Concurrency & State
 * **Async Runtime:** `tokio` (full features). Ensure all IO and network calls are non-blocking.
-* **Shared State:** Use `dashmap::DashMap` wrapped in `std::sync::Arc` for shared mutable state. Avoid `std::sync::RwLock` or `std::sync::Mutex` unless absolutely necessary for granular control.
+* **Shared State:** Guard shared mutable state with `tokio::sync::{RwLock, Mutex}` wrapping a plain `HashMap`/`HashSet`, held briefly (clone an `Arc` out, or insert/remove, then drop the guard). These maps are per-user and cold — do NOT reach for `dashmap::DashMap`; its sync, `!Send`-across-`.await` guards earn nothing without a hot, high-contention path. See [ADR-0003](docs/adr/0003-tokio-async-locks-over-dashmap.md).
 * **Persistence:** Use `sqlx` with SQLite. Do not use ORMs like Diesel or SeaORM. All queries should use `sqlx::query!` macros for compile-time verification.
     * **CRITICAL SQLX RULE:** Because CI runs in an isolated Nix sandbox (`SQLX_OFFLINE=true`), anytime you add or modify a `sqlx::query!` macro, you MUST run `just db-prepare` to regenerate the `sqlx-data.json` file. If you do not do this, the Nix build will instantly fail.
 
