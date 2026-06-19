@@ -6,6 +6,12 @@
   openssl,
   cargo-nextest,
   cacert,
+  # When true (the release `static` build), statically link musl libc + libgcc so
+  # the binary is a portable standalone executable. A plain musl cross only links
+  # *against* musl and leaves a PT_INTERP pointing at the Nix-store ld-musl, which
+  # is useless off-Nix. Must apply to BOTH the deps cache and the final crate, so
+  # it lives in commonArgs. See ADR-0008.
+  crtStatic ? false,
 }:
 
 let
@@ -42,6 +48,9 @@ let
       maintainers = with maintainers; [ inkpotmonkey ];
       mainProgram = "jmap-matrix-bridge";
     };
+  }
+  // lib.optionalAttrs crtStatic {
+    CARGO_BUILD_RUSTFLAGS = "-C target-feature=+crt-static";
   };
 
   # Build only the cargo dependencies (fully cached by Nix). Release profile —
