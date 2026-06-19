@@ -49,7 +49,7 @@ jobs:
       # pushes newly built paths on `main` (fork PRs have no token → read-only).
       - uses: cachix/cachix-action@v15
         with:
-          name: jmap-matrix-bridge
+          name: palebluebytes
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       - name: nix flake check

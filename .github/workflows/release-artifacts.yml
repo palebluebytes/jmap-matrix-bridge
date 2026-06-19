@@ -33,7 +33,7 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: cachix/cachix-action@v15
         with:
-          name: jmap-matrix-bridge
+          name: palebluebytes
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
       # ── Static binary → GitHub Release asset ───────────────────────────────
