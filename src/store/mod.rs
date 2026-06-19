@@ -40,10 +40,20 @@ pub struct OutboundMessage {
     pub retry_count: i32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Store {
     pub(crate) pool: Pool<Sqlite>,
     pub(crate) encryption_key: Option<[u8; 32]>,
+}
+
+// Manual `Debug` so the AES master key never prints (reached via the derived
+// `Debug` on `ClientManager`/`AppState`).
+impl std::fmt::Debug for Store {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Store")
+            .field("encryption_key", &self.encryption_key.map(|_| "[REDACTED]"))
+            .finish_non_exhaustive()
+    }
 }
 
 #[allow(async_fn_in_trait)]

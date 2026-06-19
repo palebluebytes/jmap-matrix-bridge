@@ -16,12 +16,26 @@ const LOGIN_STATE_TTL_SECS: u64 = 300; // 5 minutes
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 /// The current step in the multi-step JMAP login flow for a single Matrix user.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub enum LoginState {
     None,
     WaitingForEmail,
     WaitingForPassword { email: String },
     WaitingForUrl { email: String, password: String },
+}
+
+// Manual `Debug` that prints the variant name only: the `WaitingFor*` variants
+// hold the user's email and JMAP password mid-login, which must never reach logs
+// (`transactions.rs` debug-logs the current state).
+impl std::fmt::Debug for LoginState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::None => "None",
+            Self::WaitingForEmail => "WaitingForEmail",
+            Self::WaitingForPassword { .. } => "WaitingForPassword",
+            Self::WaitingForUrl { .. } => "WaitingForUrl",
+        })
+    }
 }
 
 #[derive(Debug)]

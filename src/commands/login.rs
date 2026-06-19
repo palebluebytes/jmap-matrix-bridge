@@ -102,11 +102,7 @@ pub async fn handle_login_waiting_for_email(
     room_id: Option<&str>,
 ) -> Result<()> {
     let email = body_str.trim().to_owned();
-    tracing::debug!(
-        "Interactive login step: user {} entered email {}",
-        sender_id,
-        email
-    );
+    tracing::debug!("Interactive login step: user {sender_id} entered email");
     state
         .state_store
         .set_login_state(sender_id, LoginState::WaitingForPassword { email })
@@ -168,11 +164,7 @@ pub async fn handle_login_waiting_for_url(
     password: &str,
 ) -> Result<()> {
     let url = body_str.trim().to_owned();
-    tracing::debug!(
-        "Interactive login step: user {} entered URL: {}",
-        sender_id,
-        url
-    );
+    tracing::debug!("Interactive login step: user {sender_id} entered URL");
     notify(state, room_id, "Attempting to log in...").await;
 
     match state
@@ -190,11 +182,15 @@ pub async fn handle_login_waiting_for_url(
             notify(state, room_id, "Success! You are now logged in.").await;
         }
         Err(e) => {
+            // Log the detail server-side, but return a GENERIC message to the
+            // user: echoing the connection error turns this user-supplied-URL
+            // login into a network reachability oracle (SSRF probing aid).
             error!("Interactive login failed: {e}");
             notify(
                 state,
                 room_id,
-                &format!("Login failed: {e}. Please try again from the start by typing `login`."),
+                "Login failed: could not log in with those details. \
+                 Please try again from the start by typing `login`.",
             )
             .await;
             state.state_store.clear_login_state(sender_id).await;

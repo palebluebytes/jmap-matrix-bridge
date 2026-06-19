@@ -14,7 +14,6 @@ use anyhow::{Context, Result};
 use jmap_client::client::Client;
 use jmap_client::email::{Email, Property};
 use std::collections::HashMap;
-use std::time::Duration;
 use tracing::{debug, info, warn};
 
 /// Framed-picture emoji (U+1F5BC) — the reaction that loads an email's images.
@@ -22,7 +21,6 @@ const LOAD_IMAGES_CODEPOINT: char = '\u{1F5BC}';
 /// Caps so opting in can't pull an unbounded amount of remote data.
 const MAX_IMAGES: usize = 20;
 const MAX_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
-const FETCH_TIMEOUT_SECS: u64 = 15;
 
 /// True if a reaction key is the "load images" emoji, tolerating the optional
 /// U+FE0F variation selector and any skin-tone/extra codepoints.
@@ -112,7 +110,7 @@ async fn inline_email_images(
     let mut url_to_mxc: HashMap<String, String> = HashMap::new();
     for img in candidates {
         let fetch_url = content::decode_src_entities(&img.url);
-        match fetch_and_upload(&matrix.http_client, matrix, ghost_user_id, &fetch_url).await {
+        match fetch_and_upload(matrix, ghost_user_id, &fetch_url).await {
             Ok(mxc) => {
                 url_to_mxc.insert(img.url, mxc);
             }
@@ -163,17 +161,10 @@ async fn fetch_email(client: &Client, email_id: &str) -> Result<Option<Email>> {
 
 /// Download a remote image and upload it to the homeserver, returning its
 /// `mxc://`. Rejects non-image content types and anything over the size cap.
-async fn fetch_and_upload(
-    http: &reqwest::Client,
-    matrix: &MatrixClient,
-    ghost_user_id: &str,
-    url: &str,
-) -> Result<String> {
-    let resp = http
-        .get(url)
-        .timeout(Duration::from_secs(FETCH_TIMEOUT_SECS))
-        .send()
-        .await?;
+async fn fetch_and_upload(matrix: &MatrixClient, ghost_user_id: &str, url: &str) -> Result<String> {
+    // SSRF-safe fetch: the URL comes from an attacker-controlled email `<img src>`,
+    // so validate the host (and every redirect hop) resolves to a public address.
+    let resp = crate::net::safe_get(url, 3).await?;
     if !resp.status().is_success() {
         anyhow::bail!("HTTP {}", resp.status());
     }
@@ -264,6 +255,9 @@ mod tests {
         let matrix = MatrixClient::new(&uri, "as_token", "localhost")
             .await
             .unwrap();
+        // The mock image host is on loopback, which the SSRF guard blocks in
+        // production; permit it for this test only.
+        let _allow_private = crate::net::test_support::allow_private();
         super::inline_email_images(
             &matrix,
             "!room:localhost",
