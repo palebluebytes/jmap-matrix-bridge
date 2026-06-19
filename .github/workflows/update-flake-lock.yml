@@ -20,6 +20,10 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@main
       - uses: DeterminateSystems/update-flake-lock@main
         with:
+          # Use the PAT (not the default GITHUB_TOKEN) so the PR can be created
+          # even when the org disallows Actions creating PRs, AND so the PR
+          # triggers `ci.yml` (GITHUB_TOKEN-authored PRs don't trigger workflows).
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
           pr-title: "chore: update flake.lock"
           commit-msg: "chore: update flake.lock"
           branch: deps/flake-lock
