@@ -1,5 +1,9 @@
 # JMAP Matrix Bridge
 
+[![CI](https://github.com/palebluebytes/jmap-matrix-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/palebluebytes/jmap-matrix-bridge/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/palebluebytes/jmap-matrix-bridge?sort=semver)](https://github.com/palebluebytes/jmap-matrix-bridge/releases)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#)
+
 A Rust [Matrix Application Service](https://spec.matrix.org/latest/application-service-api/)
 that bridges a [JMAP](https://jmap.io/) email account (Stalwart, Fastmail, …) into
 Matrix: each email conversation becomes a Matrix room, and messages you send in
@@ -56,6 +60,27 @@ nix build .#jmap-matrix-bridge
 # or
 cargo build --release
 ```
+
+### Install a release build
+
+Each tagged release (see [Releases](https://github.com/palebluebytes/jmap-matrix-bridge/releases))
+ships a standalone **static binary** for `x86_64-linux` and `aarch64-linux` plus a
+**multi-arch container image**:
+
+```bash
+# Container (Docker/Podman/k8s)
+docker pull ghcr.io/palebluebytes/jmap-matrix-bridge:latest
+docker run --rm ghcr.io/palebluebytes/jmap-matrix-bridge:latest run --help
+
+# Static binary (no Nix/Docker required)
+curl -fsSL -o jmap-matrix-bridge \
+  https://github.com/palebluebytes/jmap-matrix-bridge/releases/latest/download/jmap-matrix-bridge-vX.Y.Z-x86_64-linux
+chmod +x jmap-matrix-bridge
+```
+
+For Nix consumers, the flake exposes `overlays.default` and
+`nixosModules.jmap-bridge` — the recommended way to deploy (see
+[`nix/module/`](nix/module/)).
 
 ## Configure & run
 
@@ -162,6 +187,17 @@ just nextest   # run the test suite (cargo-nextest)
 just lint      # clippy + rustfmt --check
 nix flake check  # the authoritative build + VM round-trip check
 ```
+
+## Releases
+
+CI runs a single authoritative gate on every PR — `nix flake check` (build +
+clippy + rustfmt + unit tests + the VM round-trip), across x86_64 and aarch64.
+
+Versioning is automated with [release-plz](https://release-plz.dev): every merge to
+`main` keeps a "release vX.Y.Z" PR up to date with a generated `CHANGELOG.md`, and
+**cutting a release is merging that PR** — which tags the version, publishes the
+GitHub Release, and builds the static binaries + container image. The full flow and
+rationale are in [ADR-0008](docs/adr/0008-ci-and-release-flow.md).
 
 ## See also
 
