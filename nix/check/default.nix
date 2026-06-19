@@ -86,7 +86,7 @@ pkgs.testers.nixosTest {
     {
       imports = [
         inputs.sops-nix.nixosModules.sops
-        ../../../modules/nixos/services/jmap-bridge/default.nix
+        ../module
       ];
 
       config = lib.mkMerge [
