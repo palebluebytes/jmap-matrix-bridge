@@ -10,6 +10,9 @@ result-*
 .direnv/
 .envrc.local
 
+# Local secrets / env (CI secrets live in GitHub Actions secrets, never here)
+.env
+
 # Bacon background check log (see AGENTS.md inner loop)
 bacon.log
 
