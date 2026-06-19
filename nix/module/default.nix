@@ -28,6 +28,16 @@ let
       ) ",matrix-password-file=\${CREDENTIALS_DIRECTORY}/${userMatrixPwCredName i}"
     }"'';
   userArgsStr = lib.concatStringsSep " " (lib.imap0 mkUserArg cfg.users);
+
+  # Extract the host from a URL: "http://host:port/path" -> "host". Falls back to
+  # the whole string if there's no scheme. Used to default `matrixDomain`.
+  urlHost =
+    url:
+    let
+      afterScheme = lib.last (lib.splitString "://" url);
+      hostPort = lib.head (lib.splitString "/" afterScheme);
+    in
+    lib.head (lib.splitString ":" hostPort);
 in
 {
   options.services.jmap-bridge = {
@@ -74,6 +84,21 @@ in
       type = lib.types.str;
       default = "http://127.0.0.1:6167";
       description = "Matrix Homeserver URL";
+    };
+
+    matrixDomain = lib.mkOption {
+      type = lib.types.str;
+      default = urlHost cfg.matrixUrl;
+      defaultText = lib.literalMD "the host part of `matrixUrl`";
+      example = "example.com";
+      description = ''
+        Matrix server name (domain) used to build ghost mxids
+        (`@_jmap_…:<domain>`). Defaults to the host of `matrixUrl`, which is only
+        correct when the homeserver's Client-Server API host equals its
+        `server_name`. Set this explicitly when they differ (the common case —
+        e.g. `matrixUrl` is a loopback address but the server_name is a public
+        domain).
+      '';
     };
 
     extraArgs = lib.mkOption {
@@ -231,6 +256,7 @@ in
         DATABASE_URL = "sqlite:${cfg.databaseUrl}";
         JMAP_URL = cfg.url;
         MATRIX_URL = cfg.matrixUrl;
+        MATRIX_DOMAIN = cfg.matrixDomain;
         BRIDGE_MAILBOXES = lib.boolToString cfg.bridgeMailboxes;
         RENDER_MODE = cfg.renderMode;
         QUOTE_REPLIES = lib.boolToString cfg.quoteReplies;
