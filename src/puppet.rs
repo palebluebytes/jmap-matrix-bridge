@@ -35,7 +35,7 @@ pub async fn login_password(homeserver: &str, mxid: &str, password: &str) -> Res
         "device_id": "JMAP_BRIDGE_PUPPET",
         "initial_device_display_name": "JMAP Bridge (double puppet)"
     });
-    let resp = reqwest::Client::new()
+    let resp = crate::net::client_with_timeouts()
         .post(format!("{homeserver}/_matrix/client/v3/login"))
         .json(&body)
         .send()
@@ -51,7 +51,7 @@ pub async fn login_password(homeserver: &str, mxid: &str, password: &str) -> Res
 
 /// Validate `token` and return the Matrix id it belongs to.
 pub async fn whoami(homeserver: &str, token: &str) -> Result<String> {
-    let resp = reqwest::Client::new()
+    let resp = crate::net::client_with_timeouts()
         .get(format!("{homeserver}/_matrix/client/v3/account/whoami"))
         .bearer_auth(token)
         .send()
@@ -109,7 +109,7 @@ async fn run_auto_accept(homeserver: &str, token: &str, mxid: &str, bot_user_id:
     // Minimal filter: we only care about invites, so keep joined-room payloads
     // tiny to bound the initial full sync.
     let filter = r#"{"room":{"timeline":{"limit":1}},"presence":{"types":[]}}"#;
-    let http = reqwest::Client::new();
+    let http = crate::net::client_with_timeouts(); // 120 s timeout accommodates the 30 s long-poll
     let mut since: Option<String> = None;
 
     loop {

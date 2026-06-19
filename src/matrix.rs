@@ -73,7 +73,7 @@ impl MatrixClient {
 
         Ok(Self {
             client,
-            http_client: reqwest::Client::new(),
+            http_client: crate::net::client_with_timeouts(),
             as_token: as_token.to_owned(),
             homeserver_url: homeserver_url.trim_end_matches('/').to_owned(),
             domain: domain.to_owned(),
@@ -353,17 +353,11 @@ impl MatrixClient {
         )?;
 
         let (parts, body) = http_req.into_parts();
-        let body_bytes = body.clone().freeze();
-        let http_req = http::Request::from_parts(parts, reqwest::Body::from(body_bytes.clone()));
+        let http_req = http::Request::from_parts(parts, reqwest::Body::from(body.freeze()));
         let reqwest_req = reqwest::Request::try_from(http_req)?;
 
-        tracing::info!("Register request URL: {}", reqwest_req.url());
-        tracing::info!("Register request headers: {:?}", reqwest_req.headers());
-        tracing::info!(
-            "Register request body: {}",
-            String::from_utf8_lossy(&body_bytes)
-        );
-
+        // NB: do NOT log the request headers here — they carry the appservice
+        // `as_token` as `Authorization: Bearer …` (the bridge's master credential).
         let resp = self.http_client.execute(reqwest_req).await?;
 
         let status = resp.status();
