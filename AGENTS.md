@@ -65,3 +65,19 @@ When generating or refactoring code, you MUST adhere to the following constraint
 * **Execution:** ALWAYS run `just nextest` to verify your changes. 
 * **Mocking:** When writing NEW integration tests inside the `tests/` directory, you MUST use `wiremock` to mock HTTP endpoints (JMAP or Matrix homeservers). Do not make live network requests. Your tests must be able to pass inside an offline Nix sandbox.
 * **CI / Release Builds:** The final source of truth for a successful build is the Nix sandbox. `nix build` compiles the production package, while `craneLib.cargoNextest` handles parallelized checks inside the isolated Nix build environment.
+
+---
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked as GitHub issues in `palebluebytes/jmap-matrix-bridge` via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default five-role vocabulary (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
