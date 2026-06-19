@@ -6,11 +6,33 @@ use ammonia::Builder;
 use anyhow::{Context, Result};
 use jmap_client::client::Client;
 use jmap_client::email::{Email, EmailBodyPart};
+use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 use tracing::warn;
 
 const NO_SUBJECT: &str = "(No Subject)";
+
+/// Path/query-unsafe ASCII for percent-encoding values substituted into the JMAP
+/// download URL template (RFC 8620 `{accountId}`/`{blobId}`/`{name}`). `name` is
+/// the attacker-controlled attachment filename, so encoding stops it from
+/// injecting extra path segments / query (`/`, `?`, `#`, `%`, …). Unreserved
+/// chars stay readable.
+const URL_TEMPLATE_VALUE: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'/')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'\\')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
 
 /// Internal representation of an email's content for bridging.
 #[derive(Debug)]
@@ -1119,10 +1141,11 @@ async fn bridge_attachment(
     let mime_type = part.content_type().unwrap_or("application/octet-stream");
     let file_name = part.name().unwrap_or("📎 attachment");
 
+    let enc = |s: &str| utf8_percent_encode(s, URL_TEMPLATE_VALUE).to_string();
     let url = download_template
-        .replace("{accountId}", account_id)
-        .replace("{blobId}", blob_id)
-        .replace("{name}", file_name);
+        .replace("{accountId}", &enc(account_id))
+        .replace("{blobId}", &enc(blob_id))
+        .replace("{name}", &enc(file_name));
 
     // Memory Management: Check size before downloading
     let size = part.size();

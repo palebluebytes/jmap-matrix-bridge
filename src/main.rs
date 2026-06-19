@@ -14,7 +14,27 @@ use base64::Engine as _;
 use clap::{Parser, Subcommand};
 use jmap_matrix_bridge::{client_manager, config, matrix, store};
 use std::sync::Arc;
-use tracing::info;
+use tracing::{info, warn};
+
+/// Resolve a secret from an inline value or a file path, preferring the file and
+/// rejecting both-at-once. Keeps tokens out of argv/env where a `*-file` is used.
+/// Returns `None` only when neither source is given.
+fn resolve_secret(
+    inline: Option<String>,
+    file: Option<String>,
+    name: &str,
+) -> anyhow::Result<Option<String>> {
+    match (inline, file) {
+        (Some(_), Some(_)) => anyhow::bail!("provide only one of --{name} or --{name}-file"),
+        (Some(v), None) => Ok(Some(v)),
+        (None, Some(path)) => {
+            let v = std::fs::read_to_string(&path)
+                .with_context(|| format!("failed to read --{name}-file '{path}'"))?;
+            Ok(Some(v.trim().to_owned()))
+        }
+        (None, None) => Ok(None),
+    }
+}
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -58,6 +78,11 @@ enum Commands {
         #[arg(long, env = "JMAP_TOKEN")]
         jmap_token: Option<String>,
 
+        /// Path to a file holding the JMAP token (preferred over --jmap-token,
+        /// which is visible in `ps`/`/proc`)
+        #[arg(long, env = "JMAP_TOKEN_FILE")]
+        jmap_token_file: Option<String>,
+
         /// JMAP URL
         #[arg(long, env = "JMAP_URL")]
         jmap_url: String,
@@ -87,17 +112,34 @@ enum Commands {
         #[arg(long, env = "MATRIX_URL")]
         matrix_url: String,
 
-        /// Matrix Application Service Token
+        /// Matrix Application Service Token (prefer --matrix-as-token-file)
         #[arg(long, env = "MATRIX_AS_TOKEN")]
-        matrix_as_token: String,
+        matrix_as_token: Option<String>,
+
+        /// Path to a file holding the Matrix AS token (preferred over the inline
+        /// flag, which is visible in `ps`/`/proc`)
+        #[arg(long, env = "MATRIX_AS_TOKEN_FILE")]
+        matrix_as_token_file: Option<String>,
 
         /// Matrix Homeserver Token (`hs_token`) for transaction endpoint auth
+        /// (prefer --matrix-hs-token-file)
         #[arg(long, env = "MATRIX_HS_TOKEN")]
-        matrix_hs_token: String,
+        matrix_hs_token: Option<String>,
+
+        /// Path to a file holding the Matrix homeserver token (preferred over the inline
+        /// flag, which is visible in `ps`/`/proc`)
+        #[arg(long, env = "MATRIX_HS_TOKEN_FILE")]
+        matrix_hs_token_file: Option<String>,
 
         /// Matrix Domain (e.g. palebluebytes.xyz)
         #[arg(long, env = "MATRIX_DOMAIN", default_value = "localhost")]
         matrix_domain: String,
+
+        /// Address to bind the listener to. Defaults to loopback; set to
+        /// `0.0.0.0` for container/multi-host deployments where the homeserver
+        /// reaches the bridge from another host.
+        #[arg(long, env = "LISTEN_ADDRESS", default_value = "127.0.0.1")]
+        listen_address: String,
 
         /// Port to listen on
         #[arg(short, long, default_value = "8008", env = "PORT")]
@@ -233,6 +275,7 @@ async fn main() -> anyhow::Result<()> {
             db,
             jmap_username,
             jmap_token,
+            jmap_token_file,
             jmap_url,
             jmap_sync_limit,
             bridge_mailboxes,
@@ -240,8 +283,11 @@ async fn main() -> anyhow::Result<()> {
             quote_replies,
             matrix_url,
             matrix_as_token,
+            matrix_as_token_file,
             matrix_hs_token,
+            matrix_hs_token_file,
             matrix_domain,
+            listen_address,
             port,
             encryption_key,
             encryption_key_file,
@@ -253,16 +299,26 @@ async fn main() -> anyhow::Result<()> {
                 .parse()
                 .map_err(|e: String| anyhow::anyhow!(e))?;
 
-            // Load key string from encryption_key argument or from the encryption_key_file path
-            let key_str = if let Some(key) = encryption_key {
-                Some(key)
-            } else if let Some(path) = encryption_key_file {
-                let content = std::fs::read_to_string(&path)
-                    .with_context(|| format!("Failed to read encryption key file from: {path}"))?;
-                Some(content.trim().to_owned())
-            } else {
-                None
-            };
+            // Resolve secrets from inline flag or *-file (file preferred, keeps
+            // tokens out of argv/env). The Matrix tokens are required.
+            let jmap_token = resolve_secret(jmap_token, jmap_token_file, "jmap-token")?;
+            let appservice_token =
+                resolve_secret(matrix_as_token, matrix_as_token_file, "matrix-as-token")?
+                    .context("one of --matrix-as-token / --matrix-as-token-file is required")?;
+            let homeserver_token =
+                resolve_secret(matrix_hs_token, matrix_hs_token_file, "matrix-hs-token")?
+                    .context("one of --matrix-hs-token / --matrix-hs-token-file is required")?;
+            anyhow::ensure!(
+                !appservice_token.is_empty(),
+                "matrix-as-token must not be empty"
+            );
+            anyhow::ensure!(
+                !homeserver_token.is_empty(),
+                "matrix-hs-token must not be empty"
+            );
+
+            // Same inline-or-file resolution as the tokens above.
+            let key_str = resolve_secret(encryption_key, encryption_key_file, "encryption-key")?;
 
             // Parse optional encryption key (hex-encoded 64 chars or base64-encoded 32 bytes)
             let encryption_key: Option<[u8; 32]> = if let Some(key_raw) = key_str {
@@ -301,10 +357,17 @@ async fn main() -> anyhow::Result<()> {
                 None
             };
 
+            if encryption_key.is_none() {
+                warn!(
+                    "No encryption key configured: JMAP and Matrix credentials will be stored \
+                     UNENCRYPTED in the database. Set --encryption-key-file for production."
+                );
+            }
+
             let store = store::Store::new(&db, encryption_key).await?;
             let state_store = Arc::new(jmap_matrix_bridge::state::StateStore::new());
             let matrix =
-                matrix::MatrixClient::new(&matrix_url, &matrix_as_token, &matrix_domain).await?;
+                matrix::MatrixClient::new(&matrix_url, &appservice_token, &matrix_domain).await?;
             let client_manager = Arc::new(
                 client_manager::ClientManager::new(store.clone(), matrix.clone(), jmap_sync_limit)
                     .with_bridge_mailboxes(bridge_mailboxes)
@@ -510,7 +573,7 @@ async fn main() -> anyhow::Result<()> {
                 client_manager: client_manager.clone(),
                 state_store,
                 puppet_manager: puppet_manager.clone(),
-                hs_token: matrix_hs_token,
+                hs_token: homeserver_token,
             };
 
             // Polling is handled by client_manager
@@ -542,7 +605,8 @@ async fn main() -> anyhow::Result<()> {
                 ))
                 .with_state(state);
 
-            let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+            let listener =
+                tokio::net::TcpListener::bind(format!("{listen_address}:{port}")).await?;
             let shutdown_manager = client_manager.clone();
             axum::serve(listener, app)
                 .with_graceful_shutdown(async move {

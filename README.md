@@ -150,9 +150,12 @@ Every flag has an environment-variable equivalent (shown in parentheses). Run
 | --- | --- | --- |
 | `--jmap-url` (`JMAP_URL`) | *required* | JMAP session/discovery URL |
 | `--matrix-url` (`MATRIX_URL`) | *required* | Matrix homeserver Client-Server API URL |
-| `--matrix-as-token` (`MATRIX_AS_TOKEN`) | *required* | Bridge → homeserver auth token |
-| `--matrix-hs-token` (`MATRIX_HS_TOKEN`) | *required* | Homeserver → bridge transaction auth token |
+| `--matrix-as-token` (`MATRIX_AS_TOKEN`) | *required* | Bridge → homeserver auth token (prefer the `-file` form) |
+| `--matrix-as-token-file` (`MATRIX_AS_TOKEN_FILE`) | — | File holding the AS token (keeps it out of `ps`/`/proc`) |
+| `--matrix-hs-token` (`MATRIX_HS_TOKEN`) | *required* | Homeserver → bridge transaction auth token (prefer the `-file` form) |
+| `--matrix-hs-token-file` (`MATRIX_HS_TOKEN_FILE`) | — | File holding the hs_token (keeps it out of `ps`/`/proc`) |
 | `--matrix-domain` (`MATRIX_DOMAIN`) | `localhost` | Matrix server name (used to build ghost mxids) |
+| `--listen-address` (`LISTEN_ADDRESS`) | `127.0.0.1` | Address to bind. Use `0.0.0.0` for container/multi-host setups where the homeserver connects from another host |
 | `--port` (`PORT`) | `8008` | TCP port the bridge listens on |
 | `--db` (`DATABASE_URL`) | `sqlite:bridge.db` | SQLite database URL |
 | `--encryption-key` (`ENCRYPTION_KEY`) | — | AES-256 key (base64 or hex) for credentials at rest |
