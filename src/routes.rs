@@ -35,7 +35,7 @@ impl std::fmt::Debug for AppState {
             .field("client_manager", &self.client_manager)
             .field("state_store", &self.state_store)
             .field("hs_token", &"[REDACTED]")
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 

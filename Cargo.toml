@@ -3,6 +3,7 @@ name = "jmap-matrix-bridge"
 version = "0.2.0"
 description = "A bridge between JMAP email and Matrix messaging"
 license = "MIT OR Apache-2.0"
+readme = "README.md"
 repository = "https://github.com/palebluebytes/jmap-matrix-bridge"
 keywords = ["jmap", "matrix", "bridge", "email"]
 categories = ["email", "web-programming"]

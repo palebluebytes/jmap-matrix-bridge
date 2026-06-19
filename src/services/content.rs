@@ -139,7 +139,10 @@ impl EmailBody {
         }
     }
 
-    fn extract_body(email: &Email, parts: &[EmailBodyPart]) -> Option<(String, bool, Option<String>)> {
+    fn extract_body(
+        email: &Email,
+        parts: &[EmailBodyPart],
+    ) -> Option<(String, bool, Option<String>)> {
         let part = parts.first()?;
         let part_id = part.part_id()?;
         let content_type = part.content_type().map(str::to_owned);
@@ -163,9 +166,36 @@ pub(crate) fn original_html(email: &Email) -> Option<String> {
 #[must_use]
 fn looks_like_html(s: &str) -> bool {
     const TAGS: &[&str] = &[
-        "<div", "<p>", "<p ", "<br", "<a ", "<a>", "<table", "<td", "<tr", "<span", "<img",
-        "<ul", "<ol", "<li", "<blockquote", "<figure", "<h1", "<h2", "<h3", "<h4", "<strong",
-        "<em>", "<b>", "<i>", "<html", "<body", "<head", "<style", "<font", "<center",
+        "<div",
+        "<p>",
+        "<p ",
+        "<br",
+        "<a ",
+        "<a>",
+        "<table",
+        "<td",
+        "<tr",
+        "<span",
+        "<img",
+        "<ul",
+        "<ol",
+        "<li",
+        "<blockquote",
+        "<figure",
+        "<h1",
+        "<h2",
+        "<h3",
+        "<h4",
+        "<strong",
+        "<em>",
+        "<b>",
+        "<i>",
+        "<html",
+        "<body",
+        "<head",
+        "<style",
+        "<font",
+        "<center",
     ];
     let bytes = s.as_bytes();
     TAGS.iter()
@@ -307,9 +337,34 @@ fn strip_invisibles(s: &str) -> String {
 /// they're safe to drop entirely if empty. Excludes void/meaningful-empty tags
 /// (`br`, `hr`, `img`).
 const PRUNABLE_WHEN_EMPTY: &[&str] = &[
-    "a", "h1", "h2", "h3", "h4", "h5", "h6", "p", "span", "div", "b", "i", "u",
-    "strong", "em", "s", "del", "sub", "sup", "code", "blockquote", "ul", "ol",
-    "li", "pre", "details", "summary", "caption",
+    "a",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "p",
+    "span",
+    "div",
+    "b",
+    "i",
+    "u",
+    "strong",
+    "em",
+    "s",
+    "del",
+    "sub",
+    "sup",
+    "code",
+    "blockquote",
+    "ul",
+    "ol",
+    "li",
+    "pre",
+    "details",
+    "summary",
+    "caption",
 ];
 
 /// Drop wrapper elements whose content is "blank" (only whitespace and `&nbsp;`),
@@ -382,7 +437,10 @@ fn prunable_open_name(rest: &str) -> Option<&'static str> {
     if rest.starts_with("</") {
         return None;
     }
-    PRUNABLE_WHEN_EMPTY.iter().copied().find(|n| starts_tag(rest, &format!("<{n}")))
+    PRUNABLE_WHEN_EMPTY
+        .iter()
+        .copied()
+        .find(|n| starts_tag(rest, &format!("<{n}")))
 }
 
 /// Advance past "blank" content from byte `k`: ASCII/Unicode whitespace, the
@@ -598,7 +656,10 @@ fn tag_attr<'a>(tag: &'a str, name: &str) -> Option<(&'a str, std::ops::Range<us
     while let Some(rel) = find_ci(&bytes[search..], name.as_bytes(), 0) {
         let pos = search + rel;
         let before_ok = pos == 0
-            || matches!(bytes[pos - 1], b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' | b'/');
+            || matches!(
+                bytes[pos - 1],
+                b' ' | b'\t' | b'\n' | b'\r' | b'"' | b'\'' | b'/'
+            );
         let mut k = pos + name.len();
         while k < bytes.len() && matches!(bytes[k], b' ' | b'\t') {
             k += 1;
@@ -613,15 +674,15 @@ fn tag_attr<'a>(tag: &'a str, name: &str) -> Option<(&'a str, std::ops::Range<us
                 Some(b'\'') => (k + 1, Some('\'')),
                 _ => (k, None),
             };
-            let end = match quote {
-                Some(q) => start + tag[start..].find(q).unwrap_or(tag.len() - start),
-                None => {
+            let end = quote.map_or_else(
+                || {
                     start
                         + tag[start..]
                             .find(|c: char| c.is_whitespace() || c == '>' || c == '/')
                             .unwrap_or(tag.len() - start)
-                }
-            };
+                },
+                |q| start + tag[start..].find(q).unwrap_or(tag.len() - start),
+            );
             return Some((&tag[start..end], start..end));
         }
         search = pos + name.len();
@@ -638,7 +699,9 @@ pub(crate) fn extract_remote_images(html: &str) -> Vec<RemoteImg> {
     let mut out: Vec<RemoteImg> = Vec::new();
     let mut i = 0;
     while let Some(start) = find_ci(&bytes[i..], b"<img", 0).map(|r| i + r) {
-        let end = html[start..].find('>').map_or(html.len(), |g| start + g + 1);
+        let end = html[start..]
+            .find('>')
+            .map_or(html.len(), |g| start + g + 1);
         let tag = &html[start..end];
         if let Some((src, _)) = tag_attr(tag, "src") {
             let lower = src.trim().to_ascii_lowercase();
@@ -668,7 +731,9 @@ fn placeholder_remote_images(html: &str) -> String {
     let mut i = 0;
     while let Some(start) = find_ci(&bytes[i..], b"<img", 0).map(|r| i + r) {
         out.push_str(&html[i..start]);
-        let end = html[start..].find('>').map_or(html.len(), |g| start + g + 1);
+        let end = html[start..]
+            .find('>')
+            .map_or(html.len(), |g| start + g + 1);
         let tag = &html[start..end];
         let src = tag_attr(tag, "src").map_or("", |(v, _)| v);
         let lower = src.trim().to_ascii_lowercase();
@@ -693,9 +758,12 @@ pub(crate) fn render_inline_images(html: &str, url_to_mxc: &HashMap<String, Stri
     let mut i = 0;
     while let Some(start) = find_ci(&bytes[i..], b"<img", 0).map(|r| i + r) {
         out.push_str(&html[i..start]);
-        let end = html[start..].find('>').map_or(html.len(), |g| start + g + 1);
+        let end = html[start..]
+            .find('>')
+            .map_or(html.len(), |g| start + g + 1);
         let tag = &html[start..end];
-        match tag_attr(tag, "src").and_then(|(src, range)| url_to_mxc.get(src).map(|mxc| (range, mxc)))
+        match tag_attr(tag, "src")
+            .and_then(|(src, range)| url_to_mxc.get(src).map(|mxc| (range, mxc)))
         {
             Some((range, mxc)) => {
                 out.push_str(&tag[..range.start]);
@@ -728,9 +796,36 @@ fn matrix_sanitizer(links_mode: bool) -> Builder<'static> {
     // and `blockquote` (in clean_content_tags below). `font` is not a Matrix tag
     // either, so it is unwrapped automatically.
     let mut tags: HashSet<&str> = HashSet::from([
-        "del", "h1", "h2", "h3", "h4", "h5", "h6", "p", "a", "ul", "ol", "sup", "sub", "li", "b",
-        "i", "u", "strong", "em", "s", "code", "hr", "br", "div", "span", "img", "pre", "details",
-        "summary", "blockquote",
+        "del",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "p",
+        "a",
+        "ul",
+        "ol",
+        "sup",
+        "sub",
+        "li",
+        "b",
+        "i",
+        "u",
+        "strong",
+        "em",
+        "s",
+        "code",
+        "hr",
+        "br",
+        "div",
+        "span",
+        "img",
+        "pre",
+        "details",
+        "summary",
+        "blockquote",
     ]);
     if links_mode {
         tags.remove("img"); // void → dropped entirely
@@ -740,7 +835,10 @@ fn matrix_sanitizer(links_mode: bool) -> Builder<'static> {
 
     let tag_attributes: HashMap<&str, HashSet<&str>> = HashMap::from([
         ("a", HashSet::from(["href", "target"])),
-        ("img", HashSet::from(["src", "width", "height", "alt", "title"])),
+        (
+            "img",
+            HashSet::from(["src", "width", "height", "alt", "title"]),
+        ),
         ("ol", HashSet::from(["start"])),
         ("code", HashSet::from(["class"])),
     ]);
@@ -810,7 +908,10 @@ pub(crate) fn clean_subject(subject: &str) -> String {
     let mut s = subject.trim();
     loop {
         let lower = s.to_ascii_lowercase();
-        let Some(p) = ["re:", "fwd:", "fw:"].iter().find(|p| lower.starts_with(**p)) else {
+        let Some(p) = ["re:", "fwd:", "fw:"]
+            .iter()
+            .find(|p| lower.starts_with(**p))
+        else {
             break;
         };
         s = s[p.len()..].trim_start();
@@ -1186,7 +1287,10 @@ mod tests {
         let dirty = "<!DOCTYPE html><html><head><style>/* css */</style></head>\
                      <body><!-- hi --><p>Hello <b>world</b></p></body></html>";
         let clean = sanitize_for_matrix(dirty, RenderMode::Rich);
-        assert!(clean.contains("<p>Hello") && clean.contains("<b>world</b>"), "{clean}");
+        assert!(
+            clean.contains("<p>Hello") && clean.contains("<b>world</b>"),
+            "{clean}"
+        );
         // Chrome and its CONTENT are gone (style is not merely unwrapped).
         assert!(
             !clean.contains("css")
@@ -1205,7 +1309,10 @@ mod tests {
         let dirty = "<table style=\"max-width:600px\"><tbody><tr>\
                      <td><p>First para</p><p>Second para</p></td></tr></tbody></table>";
         let clean = sanitize_for_matrix(dirty, RenderMode::Rich);
-        assert!(clean.contains("First para") && clean.contains("Second para"), "{clean}");
+        assert!(
+            clean.contains("First para") && clean.contains("Second para"),
+            "{clean}"
+        );
         assert!(
             !clean.contains("<table") && !clean.contains("<td") && !clean.contains("<tr"),
             "table tags must be unwrapped (linearized): {clean}"
@@ -1300,7 +1407,10 @@ mod tests {
             !out.contains('\u{034F}') && !out.contains('\u{00AD}'),
             "invisible spacers stripped: {out:?}"
         );
-        assert!(!out.contains('\u{2007}'), "figure-space ladder collapsed: {out:?}");
+        assert!(
+            !out.contains('\u{2007}'),
+            "figure-space ladder collapsed: {out:?}"
+        );
         assert!(!out.contains("<h1>"), "empty heading pruned: {out:?}");
         assert!(out.contains("Hello there"), "real text kept: {out:?}");
         assert!(out.contains("<p>Body.</p>"), "real content kept: {out:?}");
@@ -1317,11 +1427,18 @@ mod tests {
         let out = sanitize_for_matrix(html, RenderMode::Links);
         // Exactly one 🖼️ (the content banner); the 1×1 tracker and the 24×24
         // decorative icon get none.
-        assert_eq!(out.matches('🖼').count(), 1, "one marker for the content image: {out}");
+        assert_eq!(
+            out.matches('🖼').count(),
+            1,
+            "one marker for the content image: {out}"
+        );
         // The wrapping link is kept, so the marker is clickable.
         assert!(out.contains("href=\"https://x/go\""), "link kept: {out}");
         assert!(!out.contains("<img"), "no raw img in links mode: {out}");
-        assert!(out.contains("before") && out.contains("after"), "text kept: {out}");
+        assert!(
+            out.contains("before") && out.contains("after"),
+            "text kept: {out}"
+        );
         // Rich mode does NOT add placeholders (it keeps real images).
         assert!(!sanitize_for_matrix(html, RenderMode::Rich).contains('🖼'));
     }
@@ -1351,13 +1468,22 @@ mod tests {
             <img src=\"https://x/b.png\">";
         // Only a.png is "loaded" (mapped to mxc); b.png stays remote.
         let mut map = HashMap::new();
-        map.insert("https://x/a.png?u=1&amp;v=2".to_owned(), "mxc://hs/aaa".to_owned());
+        map.insert(
+            "https://x/a.png?u=1&amp;v=2".to_owned(),
+            "mxc://hs/aaa".to_owned(),
+        );
         let out = render_inline_images(html, &map);
         assert!(out.contains("mxc://hs/aaa"), "mapped img inlined: {out}");
-        assert!(!out.contains("https://x/b.png"), "unmapped remote img dropped: {out}");
+        assert!(
+            !out.contains("https://x/b.png"),
+            "unmapped remote img dropped: {out}"
+        );
         assert!(out.contains("<p>hi</p>"), "text kept: {out}");
         // Entity decode turns the rewrite key into a fetchable URL.
-        assert_eq!(decode_src_entities("https://x/a.png?u=1&amp;v=2"), "https://x/a.png?u=1&v=2");
+        assert_eq!(
+            decode_src_entities("https://x/a.png?u=1&amp;v=2"),
+            "https://x/a.png?u=1&v=2"
+        );
         // The extractor's key matches the map key exactly (so rewrite lands).
         let imgs: Vec<RemoteImg> = extract_remote_images(html);
         assert!(map.contains_key(&imgs[0].url));
@@ -1398,7 +1524,10 @@ mod tests {
             out.contains("<li>Using AI to improve design systems</li>"),
             "marker and text must end up inline (no inner <p>): {out}"
         );
-        assert!(!out.contains("<p>"), "list-item paragraphs unwrapped: {out}");
+        assert!(
+            !out.contains("<p>"),
+            "list-item paragraphs unwrapped: {out}"
+        );
     }
 
     #[test]
@@ -1466,7 +1595,10 @@ mod tests {
     fn format_reply_quote_structure() {
         use super::format_reply_quote;
         let q = format_reply_quote("Thomas <t@x>", "2026-06-17 00:07 UTC", "a\n\nb");
-        assert_eq!(q, "On 2026-06-17 00:07 UTC, Thomas <t@x> wrote:\n> a\n>\n> b");
+        assert_eq!(
+            q,
+            "On 2026-06-17 00:07 UTC, Thomas <t@x> wrote:\n> a\n>\n> b"
+        );
     }
 
     #[test]
@@ -1474,7 +1606,11 @@ mod tests {
         use super::{format_reply_quote, strip_quoted_reply};
         // The matched-pair invariant: a body we quote is fully removed again by
         // the inbound stripper, so the quote never leaks into the timeline.
-        let quote = format_reply_quote("Thomas <t@x>", "2026-06-17 00:07 UTC", "old line 1\nold line 2");
+        let quote = format_reply_quote(
+            "Thomas <t@x>",
+            "2026-06-17 00:07 UTC",
+            "old line 1\nold line 2",
+        );
         let outbound = format!("my new reply\n\n{quote}");
         assert_eq!(strip_quoted_reply(&outbound), "my new reply");
     }
@@ -1485,7 +1621,11 @@ mod tests {
         let s = "é".repeat(100); // 200 bytes, no whitespace
         let out = clamp_utf8(&s, 51); // 51 lands mid-codepoint -> backs up to 50
         assert!(out.len() <= 51 && out.is_char_boundary(out.len()));
-        assert_eq!(out.chars().count(), 25, "should keep whole 'é' chars: {out:?}");
+        assert_eq!(
+            out.chars().count(),
+            25,
+            "should keep whole 'é' chars: {out:?}"
+        );
         // Shorter than the limit -> unchanged.
         assert_eq!(clamp_utf8("hi", 100), "hi");
     }
@@ -1497,8 +1637,15 @@ mod tests {
         let plain = "word ".repeat(MATRIX_BODY_BUDGET); // way over budget
         let (p, h) = clamp_to_matrix_limit(plain, html);
         assert!(h.is_none(), "oversized formatted body must be dropped");
-        assert!(p.len() <= MATRIX_BODY_BUDGET, "plain must fit the budget: {}", p.len());
-        assert!(p.contains("truncated"), "a truncation notice must be appended");
+        assert!(
+            p.len() <= MATRIX_BODY_BUDGET,
+            "plain must fit the budget: {}",
+            p.len()
+        );
+        assert!(
+            p.contains("truncated"),
+            "a truncation notice must be appended"
+        );
     }
 
     #[test]
@@ -1534,7 +1681,10 @@ mod tests {
         }));
         let body = EmailBody::from_email(&email, RenderMode::Links);
         let total = body.plain.len() + body.html.as_deref().map_or(0, str::len);
-        assert!(total <= MATRIX_BODY_BUDGET, "bridged event body must fit Matrix's limit: {total}");
+        assert!(
+            total <= MATRIX_BODY_BUDGET,
+            "bridged event body must fit Matrix's limit: {total}"
+        );
         assert!(body.plain.contains("truncated"));
     }
 
@@ -1598,20 +1748,47 @@ mod tests {
         for mode in [RenderMode::Rich, RenderMode::Links] {
             let out = sanitize_for_matrix(dirty, mode);
             let lower = out.to_lowercase();
-            assert!(!lower.contains("<script"), "{mode:?}: script tag survived: {out}");
-            assert!(!lower.contains("alert(1)"), "{mode:?}: script content survived: {out}");
-            assert!(!lower.contains("<style") && !lower.contains("secretcss"), "{mode:?}: style survived: {out}");
-            assert!(!lower.contains("onclick"), "{mode:?}: inline handler survived: {out}");
-            assert!(!lower.contains("javascript:"), "{mode:?}: javascript: scheme survived: {out}");
-            assert!(!lower.contains("<marquee"), "{mode:?}: disallowed tag survived: {out}");
+            assert!(
+                !lower.contains("<script"),
+                "{mode:?}: script tag survived: {out}"
+            );
+            assert!(
+                !lower.contains("alert(1)"),
+                "{mode:?}: script content survived: {out}"
+            );
+            assert!(
+                !lower.contains("<style") && !lower.contains("secretcss"),
+                "{mode:?}: style survived: {out}"
+            );
+            assert!(
+                !lower.contains("onclick"),
+                "{mode:?}: inline handler survived: {out}"
+            );
+            assert!(
+                !lower.contains("javascript:"),
+                "{mode:?}: javascript: scheme survived: {out}"
+            );
+            assert!(
+                !lower.contains("<marquee"),
+                "{mode:?}: disallowed tag survived: {out}"
+            );
             // Non-mxc/non-allowed-scheme img src must be dropped (url_relative/schemes).
-            assert!(!out.contains("http://evil"), "{mode:?}: bad img src survived: {out}");
+            assert!(
+                !out.contains("http://evil"),
+                "{mode:?}: bad img src survived: {out}"
+            );
             // The text content of unwrapped tags is preserved.
-            assert!(out.contains("hi") && out.contains("red"), "{mode:?}: text lost: {out}");
+            assert!(
+                out.contains("hi") && out.contains("red"),
+                "{mode:?}: text lost: {out}"
+            );
         }
         // data-mx-color is a Matrix attribute and must be preserved (Rich keeps span).
         let rich = sanitize_for_matrix(dirty, RenderMode::Rich);
-        assert!(rich.contains("data-mx-color"), "data-mx-* must be preserved: {rich}");
+        assert!(
+            rich.contains("data-mx-color"),
+            "data-mx-* must be preserved: {rich}"
+        );
     }
 
     fn link_email() -> Email {
@@ -1631,7 +1808,10 @@ mod tests {
     #[test]
     fn links_mode_emits_clickable_link_without_images() {
         let body = EmailBody::from_email(&link_email(), RenderMode::Links);
-        let html = body.html.as_deref().expect("links mode emits a formatted body");
+        let html = body
+            .html
+            .as_deref()
+            .expect("links mode emits a formatted body");
         assert!(html.contains("href=\"https://kit.com/confirm\""), "{html}");
         assert!(!html.contains("<img"), "links mode drops images: {html}");
     }
@@ -1639,7 +1819,10 @@ mod tests {
     #[test]
     fn rich_mode_keeps_full_html_including_images() {
         let body = EmailBody::from_email(&link_email(), RenderMode::Rich);
-        let html = body.html.as_deref().expect("rich mode emits a formatted body");
+        let html = body
+            .html
+            .as_deref()
+            .expect("rich mode emits a formatted body");
         assert!(html.contains("<img"), "rich mode keeps images: {html}");
     }
 

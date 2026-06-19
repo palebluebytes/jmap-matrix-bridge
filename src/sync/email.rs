@@ -31,8 +31,18 @@ fn ghost_display_name(name: Option<&str>, email: &str) -> String {
 /// real alias is picked even when the user has several), then the first `To`,
 /// then the user's own address.
 fn recipient_alias(email: &Email, own_email: Option<&str>) -> Option<String> {
-    let to: Vec<&str> = email.to().unwrap_or(&[]).iter().map(EmailAddress::email).collect();
-    let cc: Vec<&str> = email.cc().unwrap_or(&[]).iter().map(EmailAddress::email).collect();
+    let to: Vec<&str> = email
+        .to()
+        .unwrap_or(&[])
+        .iter()
+        .map(EmailAddress::email)
+        .collect();
+    let cc: Vec<&str> = email
+        .cc()
+        .unwrap_or(&[])
+        .iter()
+        .map(EmailAddress::email)
+        .collect();
     choose_recipient(&to, &cc, own_email)
 }
 
@@ -367,7 +377,9 @@ impl JmapPoller {
         let lock_key_clone = lock_key.clone();
         let _guard = scopeguard::guard((), move |()| {
             tokio::spawn(async move {
-                let _ = store_clone.release_room_creation_lock(&lock_key_clone).await;
+                let _ = store_clone
+                    .release_room_creation_lock(&lock_key_clone)
+                    .await;
             });
         });
         // Re-check under the lock.
@@ -401,10 +413,10 @@ impl JmapPoller {
         // tile and, carrying a send timestamp, would disturb date ordering. The
         // topic shows from→to, including which of the user's aliases received it.
         let own_email = self.store.get_user_email(&self.matrix_user_id).await?;
-        let topic = match recipient_alias(email, own_email.as_deref()) {
-            Some(to) => format!("Email from {} to {to}", ghost.email),
-            None => format!("Email from {}", ghost.email),
-        };
+        let topic = recipient_alias(email, own_email.as_deref()).map_or_else(
+            || format!("Email from {}", ghost.email),
+            |to| format!("Email from {} to {to}", ghost.email),
+        );
         if let Err(e) = self.matrix.set_room_topic(&room_id, &topic).await {
             warn!(error = %e, "Failed to set thread room topic");
         }
@@ -451,7 +463,7 @@ impl JmapPoller {
         let from_vec = email.from().unwrap_or(&[]);
         let sender = from_vec.first();
         let email_addr = sender.map_or(UNKNOWN_SENDER, jmap_client::email::EmailAddress::email);
-        let name = sender.and_then(|f| f.name().map(ToString::to_string));
+        let name = sender.and_then(|f| f.name().map(str::to_owned));
 
         let localpart = crate::ghost::email_to_localpart(email_addr);
         let user_id = format!("@{}:{}", localpart, self.matrix.domain);

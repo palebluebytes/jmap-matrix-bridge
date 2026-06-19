@@ -132,7 +132,9 @@ async fn run_auto_accept(homeserver: &str, token: &str, mxid: &str, bot_user_id:
             }
         };
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            error!("auto-accept token for {mxid} was rejected (401); stopping. Re-run `login-matrix`.");
+            error!(
+                "auto-accept token for {mxid} was rejected (401); stopping. Re-run `login-matrix`."
+            );
             return;
         }
         if !resp.status().is_success() {
@@ -201,19 +203,22 @@ async fn join_room(
 mod tests {
     use super::{invited_by, localpart};
 
-    fn invite_room(events: serde_json::Value) -> serde_json::Value {
+    fn invite_room(events: &serde_json::Value) -> serde_json::Value {
         serde_json::json!({ "invite_state": { "events": events } })
     }
 
     #[test]
     fn localpart_extracts_name() {
-        assert_eq!(localpart("@inkpotmonkey:matrix.example.com"), "inkpotmonkey");
+        assert_eq!(
+            localpart("@inkpotmonkey:matrix.example.com"),
+            "inkpotmonkey"
+        );
         assert_eq!(localpart("inkpotmonkey"), "inkpotmonkey");
     }
 
     #[test]
     fn accepts_invite_from_the_bot() {
-        let room = invite_room(serde_json::json!([
+        let room = invite_room(&serde_json::json!([
             {
                 "type": "m.room.member",
                 "state_key": "@me:localhost",
@@ -228,7 +233,7 @@ mod tests {
     fn rejects_invite_from_a_non_bot() {
         // A stranger inviting us must NOT trigger auto-join — the puppet is
         // scoped to the bridge's own invites only.
-        let room = invite_room(serde_json::json!([
+        let room = invite_room(&serde_json::json!([
             {
                 "type": "m.room.member",
                 "state_key": "@me:localhost",
@@ -241,7 +246,7 @@ mod tests {
 
     #[test]
     fn rejects_invite_for_a_different_user() {
-        let room = invite_room(serde_json::json!([
+        let room = invite_room(&serde_json::json!([
             {
                 "type": "m.room.member",
                 "state_key": "@someone_else:localhost",
@@ -254,7 +259,7 @@ mod tests {
 
     #[test]
     fn rejects_non_invite_membership() {
-        let room = invite_room(serde_json::json!([
+        let room = invite_room(&serde_json::json!([
             {
                 "type": "m.room.member",
                 "state_key": "@me:localhost",

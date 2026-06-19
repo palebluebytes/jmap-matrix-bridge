@@ -361,7 +361,7 @@ async fn main() -> anyhow::Result<()> {
             // invites them to instead of the user clicking "Start chatting".
             let puppet_manager = Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(
                 matrix_url.clone(),
-                matrix.bot_user_id().to_string(),
+                matrix.bot_user_id(),
             ));
 
             // Spawn background database pruning task (runs every 24 hours)
@@ -463,7 +463,9 @@ async fn main() -> anyhow::Result<()> {
                                             e
                                         );
                                     }
-                                    puppet_manager.ensure_running(user.mxid.clone(), token).await;
+                                    puppet_manager
+                                        .ensure_running(user.mxid.clone(), token)
+                                        .await;
                                 }
                                 Err(e) => tracing::warn!(
                                     "Matrix double-puppet login failed for {}: {}",
@@ -598,9 +600,8 @@ mod tests {
 
     #[test]
     fn test_parse_user_spec_inline_token() {
-        let u =
-            parse_user_spec("mxid=@you:example.com,username=you,url=https://j/,token=secret")
-                .unwrap();
+        let u = parse_user_spec("mxid=@you:example.com,username=you,url=https://j/,token=secret")
+            .unwrap();
         assert_eq!(u.mxid, "@you:example.com");
         assert_eq!(u.username, "you");
         assert_eq!(u.url.as_deref(), Some("https://j/"));
@@ -621,10 +622,7 @@ mod tests {
         let dir = std::env::temp_dir();
         let path = dir.join("jmap_test_token_spec");
         std::fs::write(&path, "  file-token\n").unwrap();
-        let spec = format!(
-            "mxid=@x:y,username=x,token-file={}",
-            path.to_str().unwrap()
-        );
+        let spec = format!("mxid=@x:y,username=x,token-file={}", path.to_str().unwrap());
         let u = parse_user_spec(&spec).unwrap();
         assert_eq!(u.token, "file-token");
         std::fs::remove_file(&path).ok();
