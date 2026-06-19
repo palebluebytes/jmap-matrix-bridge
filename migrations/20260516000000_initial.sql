@@ -56,7 +56,10 @@ CREATE TABLE IF NOT EXISTS room_ghost_mapping (
     matrix_user_id TEXT NOT NULL,
     FOREIGN KEY (matrix_user_id) REFERENCES users(matrix_user_id) ON DELETE CASCADE
 ) STRICT;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_room_ghost_user ON room_ghost_mapping(ghost_email, matrix_user_id);
+-- Note: a contact can have many rooms (one Matrix room per email thread), so
+-- there is intentionally no uniqueness on (ghost_email, matrix_user_id). The
+-- room -> email binding is unique by matrix_room_id (the primary key), which is
+-- all the outbound reply lookup (get_ghost_email_by_room) needs.
 
 -- Thread subject cache
 CREATE TABLE IF NOT EXISTS matrix_thread_subjects (
