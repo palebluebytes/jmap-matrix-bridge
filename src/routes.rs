@@ -14,7 +14,14 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 use tracing::{debug, error, info, warn};
+
+/// Constant-time token comparison, to avoid leaking the `hs_token` byte-by-byte
+/// through response timing.
+fn token_matches(provided: &str, expected: &str) -> bool {
+    provided.as_bytes().ct_eq(expected.as_bytes()).into()
+}
 
 // Re-export MatrixTransaction and notify for backward-compatibility
 pub use crate::services::transactions::{MatrixTransaction, notify};
@@ -67,7 +74,7 @@ pub async fn auth_middleware(
     let hs_token = &state.hs_token;
 
     match token {
-        Some(token) if token == hs_token => {
+        Some(token) if token_matches(token, hs_token) => {
             debug!("Authenticated request");
             next.run(request).await
         }
@@ -107,21 +114,19 @@ pub async fn handle_transactions(
     Path(txn_id): Path<String>,
     Json(txn): Json<MatrixTransaction>,
 ) -> impl IntoResponse {
-    match state
-        .client_manager
-        .store
-        .is_transaction_processed(&txn_id)
-        .await
-    {
-        Ok(true) => {
-            debug!(%txn_id, "Transaction already processed, skipping");
+    // Atomically claim the transaction (insert-if-absent). Replaces a
+    // check-then-act pair so two concurrent deliveries of the same txn id can't
+    // both process it (e.g. duplicate homeserver retries).
+    match state.client_manager.store.claim_transaction(&txn_id).await {
+        Ok(false) => {
+            debug!(%txn_id, "Transaction already processed/claimed, skipping");
             return Json(serde_json::json!({})).into_response();
         }
         Err(e) => {
-            error!(%txn_id, error = %e, "Failed to check transaction status");
+            error!(%txn_id, error = %e, "Failed to claim transaction");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
-        _ => {}
+        Ok(true) => {}
     }
 
     info!(%txn_id, "Received Matrix transaction with {} events", txn.events.len());
@@ -129,19 +134,21 @@ pub async fn handle_transactions(
     if let Err(err) = crate::services::transactions::process_transaction(&state, &txn_id, txn).await
     {
         error!(%txn_id, error = %err, "Transaction processing failed");
+        // Transient DB error: release the claim and 500 so the homeserver
+        // re-delivers. Other (likely permanent) errors keep the claim and ack —
+        // an appservice that 500s forever on a poison event stalls its entire
+        // transaction stream, so such events are dropped rather than retried.
         if err.downcast_ref::<sqlx::Error>().is_some() {
+            if let Err(e) = state
+                .client_manager
+                .store
+                .unclaim_transaction(&txn_id)
+                .await
+            {
+                error!(%txn_id, error = %e, "Failed to release transaction claim after error");
+            }
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
-    }
-
-    if let Err(e) = state
-        .client_manager
-        .store
-        .mark_transaction_processed(&txn_id)
-        .await
-    {
-        error!(%txn_id, error = %e, "Failed to mark transaction as processed");
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
     Json(serde_json::json!({})).into_response()
