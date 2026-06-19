@@ -101,9 +101,15 @@ impl JmapPoller {
                 ids.extend_from_slice(response.updated());
                 (ids, new_state, response.has_more_changes())
             } else {
+                // Ascending (oldest-first) so the newest email is bridged last
+                // and gets the highest server stream position — Element's room
+                // list orders by that (sliding-sync bump_stamp), not the
+                // backdated origin_server_ts. This first page is the oldest
+                // emails; the backfill task walks forward to the newest, which
+                // therefore land on top. See backfill::backfill_batch.
                 let email_query = request.query_email();
                 email_query
-                    .sort([jmap_client::email::query::Comparator::received_at().descending()])
+                    .sort([jmap_client::email::query::Comparator::received_at().ascending()])
                     .limit(self.sync_limit);
                 email_query.arguments().collapse_threads(false);
                 let mut response = request

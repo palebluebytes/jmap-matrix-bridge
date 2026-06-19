@@ -85,8 +85,15 @@ impl JmapPoller {
     pub async fn backfill_batch(&self, pos: usize) -> Result<bool> {
         let mut request = self.client.build();
         let email_query = request.query_email();
+        // Ascending (oldest-first): Element's room list orders by the server
+        // stream position of each room's last message (sliding-sync bump_stamp),
+        // NOT the message's origin_server_ts. Bridging oldest-first means the
+        // newest email is processed last and gets the highest stream position,
+        // so the list sorts newest-first like a mail client. (Ascending paging
+        // is also stable: new mail lands at the high end, never shifting the
+        // positions we're walking.)
         email_query
-            .sort([jmap_client::email::query::Comparator::received_at().descending()])
+            .sort([jmap_client::email::query::Comparator::received_at().ascending()])
             .position(i32::try_from(pos).context("Position overflow")?)
             .limit(self.sync_limit);
         email_query.arguments().collapse_threads(false);
