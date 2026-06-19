@@ -185,7 +185,7 @@ pkgs.testers.nixosTest {
           # Provide the package via overlay
           nixpkgs.overlays = [
             (_final: prev: {
-              jmap-matrix-bridge = self.packages.${prev.system}.jmap-matrix-bridge;
+              jmap-matrix-bridge = self.packages.${prev.stdenv.hostPlatform.system}.jmap-matrix-bridge;
             })
           ];
 
