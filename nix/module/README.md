@@ -1,62 +1,103 @@
-# JMAP Matrix Bridge Module
+# JMAP Matrix Bridge — NixOS module
 
-This NixOS module deploys the `jmap-matrix-bridge` service, managing the process, environment, and persistence. It supports the multi-user architecture where users authenticate themselves via Matrix commands.
+Deploys the `jmap-matrix-bridge` service: a `DynamicUser` systemd unit with state in
+`/var/lib/jmap-bridge`, secrets loaded via `LoadCredential` and an optional
+`environmentFile`. Users can be provisioned declaratively (see `users` below) or
+authenticate themselves at runtime via Matrix commands.
 
-## Options
+Import it from the flake as `nixosModules.jmap-bridge`; the overlay supplies
+`pkgs.jmap-matrix-bridge` as the default package.
+
+## Options (`services.jmap-bridge.*`)
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
-| `services.jmap-bridge.enable` | bool | `false` | Enable the JMAP Bridge service. |
-| `services.jmap-bridge.url` | str | `"http://127.0.0.1:8080/jmap/session"` | **Default JMAP Session URL**. Used as a hint or default for the service. Users provide specific URLs during login. |
-| `services.jmap-bridge.matrixUrl` | str | `"http://127.0.0.1:6167"` | URL of the Matrix Homeserver (Client-Server API) for sending events. |
-| `services.jmap-bridge.databaseUrl` | str | `"sqlite:/var/lib/jmap-bridge/bridge.db"` | Path to the SQLite database. Ensure the directory exists and is writable. |
-| `services.jmap-bridge.environmentFile` | path | `null` | Path to a file containing environment variables (e.g., from `sops-nix`). Critical for secret injection (`MATRIX_AS_TOKEN`). |
-| `services.jmap-bridge.username` | str | `null` | **Deprecated**. Static JMAP username for single-user mode. |
-| `services.jmap-bridge.registration` | submodule | - | Configuration for generating/managing the App Service registration file. |
+| `enable` | bool | `false` | Enable the service. |
+| `package` | package | `pkgs.jmap-matrix-bridge` | Bridge package to run. |
+| `url` | str | `"http://127.0.0.1:8080"` | JMAP server URL (passed as `JMAP_URL`; the default JMAP session URL for declarative users). |
+| `matrixUrl` | str | `"http://127.0.0.1:6167"` | Matrix homeserver Client-Server API URL. |
+| `port` | port | `9999` | TCP port the bridge listens on for homeserver transactions. |
+| `databaseUrl` | str | `"bridge.db?mode=rwc"` | SQLite path, relative to the state dir (`/var/lib/jmap-bridge`). Passed as `sqlite:<value>`. |
+| `environmentFile` | null or path | `null` | File of `KEY=value` secrets — must define `MATRIX_AS_TOKEN` and `MATRIX_HS_TOKEN`. |
+| `encryptionKeyFile` | null or str | `null` | File with a 32-byte base64 AES-256 key; enables credential encryption at rest. |
+| `logLevel` | str | `"info"` | `error` \| `warn` \| `info` \| `debug` \| `trace`. |
+| `bridgeMailboxes` | bool | `false` | Also mirror JMAP mailboxes as their own Matrix rooms. |
+| `renderMode` | enum | `"links"` | Email body rendering: `plain`, `links`, or `rich`. |
+| `quoteReplies` | bool | `true` | Quote the parent in outbound replies (email-only). |
+| `extraArgs` | list of str | `[]` | Extra args appended to the `run` invocation (e.g. `[ "--matrix-domain" "example.com" ]`). |
+| `users` | list of submodule | `[]` | Declaratively provisioned users (see below). |
 
-## Example Usage
+### `users` submodule
 
-### Multi-User Setup (Recommended)
+| Option | Type | Default | Description |
+| --- | --- | --- | --- |
+| `matrixId` | str | *required* | Full Matrix user id this account bridges to, e.g. `@you:example.com`. |
+| `jmapUsername` | str | *required* | JMAP username (login). |
+| `jmapUrl` | null or str | `null` | JMAP session URL for this user; defaults to `services.jmap-bridge.url`. |
+| `tokenFile` | str | *required* | Absolute path to a file holding the JMAP token. Must **not** be a Nix store path. |
+| `matrixPasswordFile` | null or str | `null` | Absolute path to the Matrix account password; enables double-puppet auto-accept. |
+
+> The homeserver name used to build ghost mxids comes from `--matrix-domain`
+> (default `localhost`). If your homeserver isn't `localhost`, set it via
+> `extraArgs = [ "--matrix-domain" "example.com" ]` or `MATRIX_DOMAIN` in the
+> `environmentFile`.
+
+## Example
 
 ```nix
-{ config, pkgs, ... }:
+{ config, ... }:
 {
   services.jmap-bridge = {
     enable = true;
-    # Matrix server URL (from the bridge's perspective)
     matrixUrl = "http://127.0.0.1:6167";
-    
-    # Load the App Service Token (MATRIX_AS_TOKEN) from sops
+    url = "https://mail.example.com/.well-known/jmap";
+
+    # MATRIX_AS_TOKEN and MATRIX_HS_TOKEN (e.g. from sops-nix)
     environmentFile = config.sops.secrets.jmap_bridge_env.path;
-    
-    # Registration file management
-    registration = {
-        enable = true;
-        asToken = config.sops.placeholder.email_as_token;
-        hsToken = config.sops.placeholder.email_hs_token;
-        owner = "conduit"; # Ensure your Homeserver can read this
-        group = "conduit";
-    };
+    # 32-byte base64 key; credentials are encrypted at rest when set
+    encryptionKeyFile = config.sops.secrets.jmap_bridge_key.path;
+
+    extraArgs = [ "--matrix-domain" "example.com" ];
+
+    users = [{
+      matrixId = "@you:example.com";
+      jmapUsername = "you@mail.example.com";
+      tokenFile = config.sops.secrets.jmap_you_token.path;
+      # optional: lets the bridge auto-accept its own room invites as you
+      matrixPasswordFile = config.sops.secrets.matrix_you_password.path;
+    }];
   };
 }
 ```
 
-## Secrets Handling
+## Secrets
 
-The bridge needs the **Application Service Token** to communicate with the Matrix Homeserver as a privileged app service.
+- **`environmentFile`** carries the Matrix appservice tokens:
+  ```env
+  MATRIX_AS_TOKEN=...   # bridge → homeserver
+  MATRIX_HS_TOKEN=...   # homeserver → bridge (transaction auth)
+  ```
+- **`encryptionKeyFile`** and each user's **`tokenFile`** / **`matrixPasswordFile`**
+  are passed through systemd `LoadCredential`, so they may live outside the Nix
+  store (sops-nix, agenix, plain files with restricted perms).
+- **JMAP passwords for self-service users are not configured here** — users supply
+  them via the `!login` command and they're stored (encrypted, if a key is set) in
+  the SQLite database.
 
-Define this in your `sops` secrets file and expose it via `environmentFile`:
-```env
-MATRIX_AS_TOKEN=your_generated_token_here
+## Registration
+
+This module does **not** generate the Matrix appservice registration. Produce it
+once with the bridge's own subcommand and load it into your homeserver:
+
+```bash
+jmap-matrix-bridge generate-registration --url http://<host>:9999 --output registration.yaml
 ```
 
-*Note: User JMAP passwords are NOT configured here. They are provided by users via the `!login` command and stored encrypted in the local SQLite database.*
+For tuwunel, drop the file into the configured `appservice_dir`; for
+Synapse/Dendrite, reference it from the homeserver config.
 
-## User Onboarding
+## Onboarding
 
-Once the bridge is running:
-1.  Users open a DM with the bot user (defined in your registration, default `@_jmap_bot:<server_name>`).
-2.  Users authenticate:
-    ```
-    !login <jmap_username> <jmap_password> <jmap_session_url>
-    ```
+Once running, a user opens a DM with `@_jmap_bot:<server_name>` and runs `login`
+(or is provisioned via `users` above). See the [main README](../../README.md#user-guide)
+for the full command set.
