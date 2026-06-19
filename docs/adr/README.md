@@ -12,3 +12,4 @@ for the domain vocabulary these are written in.
 | [0005](0005-backfill-oldest-first.md) | Backfill processes emails oldest-first to control Matrix room ordering |
 | [0006](0006-single-instance-db-coordination.md) | Single-instance design; coordination lives in the database |
 | [0007](0007-verified-send-with-retry-queue.md) | Outbound send is verified, then retried from a durable queue |
+| [0008](0008-ci-and-release-flow.md) | CI is `nix flake check`; releases are on-demand via release-plz |
