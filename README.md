@@ -53,6 +53,32 @@ architectural decisions behind it are recorded in [`docs/adr/`](docs/adr/).
 - **Axum web server** — serves the Matrix Application Service transaction endpoint,
   authenticated with the `hs_token`.
 
+## Platform support
+
+The bridge is a **Linux server daemon**. It is built, tested, and released for
+**`x86_64-linux`** and **`aarch64-linux`** — there is no native macOS or Windows
+build (on those it runs only inside a Linux container). Pick whichever delivery
+method fits your host:
+
+| Deployment method | x86_64-linux | aarch64-linux | Requires | Best for |
+| --- | :---: | :---: | --- | --- |
+| **NixOS module** (`nixosModules.jmap-bridge` + `overlays.default`) | ✅ | ✅ | Nix · NixOS | Declarative production deploy |
+| **Nix package** (`nix build .#jmap-matrix-bridge`) | ✅ | ✅ | Nix | Nix on a non-NixOS Linux host |
+| **Container image** (`ghcr.io/palebluebytes/jmap-matrix-bridge`) | ✅ | ✅ | Docker / Podman / k8s | Containerised / Kubernetes self-host |
+| **Static binary** (release asset) | ✅ | ✅ | — *(no runtime deps)* | Any Linux host, no Nix or Docker |
+| **From source** (`cargo build --release`) | ✅ | ✅ | Rust ≥ 1.85 · `pkg-config` · sqlite | Development |
+
+Notes:
+
+- The **container image** is a multi-arch manifest (`linux/amd64` + `linux/arm64`);
+  on macOS/Windows it runs only through Docker's Linux VM, like any Linux container.
+- The **static binary** is a fully static musl executable (no dynamic loader, no
+  glibc) — drop it onto any Linux machine of the matching architecture and run it.
+- CI runs `nix flake check` on **both** architectures, but the end-to-end
+  Matrix↔email **VM round-trip test runs on `x86_64-linux` only** (`nixosTest` runs
+  on the builder's platform); `aarch64-linux` gets build + clippy + rustfmt + the
+  unit-test suite. See [ADR-0008](docs/adr/0008-ci-and-release-flow.md).
+
 ## Build
 
 ```bash
