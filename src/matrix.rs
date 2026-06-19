@@ -131,13 +131,23 @@ impl MatrixClient {
     /// Set a room's name. Used by `!compose` to label a freshly-opened
     /// conversation with the user's chosen subject.
     pub async fn set_room_name(&self, room_id: &str, name: &str) -> Result<()> {
-        self.put_state(room_id, "m.room.name", "", &serde_json::json!({ "name": name }))
-            .await
+        self.put_state(
+            room_id,
+            "m.room.name",
+            "",
+            &serde_json::json!({ "name": name }),
+        )
+        .await
     }
 
     pub async fn set_room_topic(&self, room_id: &str, topic: &str) -> Result<()> {
-        self.put_state(room_id, "m.room.topic", "", &serde_json::json!({ "topic": topic }))
-            .await
+        self.put_state(
+            room_id,
+            "m.room.topic",
+            "",
+            &serde_json::json!({ "topic": topic }),
+        )
+        .await
     }
 
     /// Best-effort read of a room's current name from the state API, or `None`
@@ -614,12 +624,7 @@ impl MatrixClient {
         let room_id = RoomId::parse(room_id)?;
         let user_id = UserId::parse(user_id)?;
 
-        let request = InviteRequest::new(
-            room_id,
-            InvitationRecipient::UserId {
-                user_id: user_id.to_owned(),
-            },
-        );
+        let request = InviteRequest::new(room_id, InvitationRecipient::UserId { user_id });
 
         let bot_id = UserId::parse(self.bot_user_id())?;
         self.send_as_ghost(request, &bot_id, None).await?;
@@ -643,7 +648,7 @@ impl MatrixClient {
         request.preset = Some(RoomPreset::PrivateChat);
         request.invite = invite_user_ids
             .iter()
-            .map(|u| UserId::parse(u))
+            .map(UserId::parse)
             .collect::<std::result::Result<Vec<_>, _>>()?;
         request.is_direct = true;
 
@@ -808,7 +813,9 @@ impl MatrixClient {
             if let Some(root_id) = thread_root_id.clone() {
                 // Use the provided latest event, falling back to the root when
                 // this is the first message in the thread.
-                let latest_id = thread_latest_event_id.clone().unwrap_or_else(|| root_id.clone());
+                let latest_id = thread_latest_event_id
+                    .clone()
+                    .unwrap_or_else(|| root_id.clone());
                 content.relates_to =
                     Some(matrix_sdk::ruma::events::room::message::Relation::Thread(
                         matrix_sdk::ruma::events::relation::Thread::plain(root_id, latest_id),
@@ -942,7 +949,9 @@ impl MatrixClient {
             }
 
             if let Some(root_id) = thread_root_id.clone() {
-                let latest_id = thread_latest_event_id.clone().unwrap_or_else(|| root_id.clone());
+                let latest_id = thread_latest_event_id
+                    .clone()
+                    .unwrap_or_else(|| root_id.clone());
                 content.relates_to =
                     Some(matrix_sdk::ruma::events::room::message::Relation::Thread(
                         matrix_sdk::ruma::events::relation::Thread::plain(root_id, latest_id),

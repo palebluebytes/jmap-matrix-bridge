@@ -234,7 +234,7 @@ mod tests {
         let store = Store::new_in_memory(None).await.unwrap();
         store
             .save_user(&RegisteredUser {
-                matrix_user_id: "".to_string(),
+                matrix_user_id: String::new(),
                 jmap_username: "empty".to_string(),
                 jmap_token: "secret".to_string(),
                 jmap_url: "http://localhost".to_string(),
