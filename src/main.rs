@@ -316,7 +316,7 @@ async fn main() -> anyhow::Result<()> {
             let mut attempts = 0;
             loop {
                 match matrix.ensure_user_exists("_jmap_bot").await {
-                    Ok(()) => {
+                    Ok(_) => {
                         info!("Bot user ensured successfully!");
                         break;
                     }

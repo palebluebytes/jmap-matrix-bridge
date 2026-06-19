@@ -311,7 +311,11 @@ impl MatrixClient {
 
     // ── User management ───────────────────────────────────────────────
 
-    pub async fn ensure_user_exists(&self, localpart: &str) -> Result<()> {
+    /// Register a ghost/bot user if it doesn't exist. Returns `true` if the user
+    /// was newly created, `false` if it already existed — callers set the display
+    /// name only on creation, to avoid profile-change `m.room.member` churn that
+    /// would bump the contact's rooms to "now" and wreck date ordering.
+    pub async fn ensure_user_exists(&self, localpart: &str) -> Result<bool> {
         info!("Ensuring Matrix user exists: {localpart}");
 
         let user_id = UserId::parse(format!("@{}:{}", localpart, self.domain))?;
@@ -358,13 +362,13 @@ impl MatrixClient {
         match status {
             s if s.is_success() => {
                 info!("User {localpart} registered successfully");
-                Ok(())
+                Ok(true)
             }
             s if s == reqwest::StatusCode::BAD_REQUEST => {
                 let text = resp.text().await.unwrap_or_default();
                 if text.contains("M_USER_IN_USE") {
                     info!("User {localpart} already exists, proceeding");
-                    Ok(())
+                    Ok(false)
                 } else {
                     anyhow::bail!("Failed to register user {localpart}: 400 Bad Request - {text}");
                 }

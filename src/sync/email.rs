@@ -456,15 +456,18 @@ impl JmapPoller {
             user_id
         );
 
-        // Auto-register ghost
-        self.matrix.ensure_user_exists(&localpart).await?;
-
-        // Sync profile display name as "Name (email)" — or just the email when
-        // the sender has no name — so the address is always visible on every
-        // message, not hidden in the room topic / encoded mxid.
-        let display_name = ghost_display_name(name.as_deref(), email_addr);
-        if let Err(e) = self.matrix.set_display_name(&user_id, &display_name).await {
-            warn!(error = %e, "Failed to sync ghost display name");
+        // Auto-register ghost. Only set the display name when the ghost is first
+        // created: re-setting it per email (senders reuse one address with
+        // varying From-names, e.g. newsletters) emits an m.room.member event in
+        // every room the ghost is in, bumping those rooms to "now" and breaking
+        // Element's date ordering. The name is "Name (email)" — or just the
+        // email when the sender has none — so the address is always visible.
+        let created = self.matrix.ensure_user_exists(&localpart).await?;
+        if created {
+            let display_name = ghost_display_name(name.as_deref(), email_addr);
+            if let Err(e) = self.matrix.set_display_name(&user_id, &display_name).await {
+                warn!(error = %e, "Failed to set ghost display name");
+            }
         }
 
         Ok(GhostUser {

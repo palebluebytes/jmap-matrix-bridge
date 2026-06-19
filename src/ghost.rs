@@ -37,12 +37,15 @@ pub async fn create_contact_room(
     email: &str,
     display_name: &str,
 ) -> Result<String> {
-    // Register the ghost and sync its display name before creating the room.
+    // Register the ghost before creating the room. Set the display name only on
+    // first creation — re-setting it churns m.room.member events across all of
+    // the ghost's rooms (bumping them to "now" and breaking date ordering).
     let localpart = email_to_localpart(email);
     let ghost_user_id = format!("@{localpart}:{}", matrix.domain);
-    matrix.ensure_user_exists(&localpart).await?;
-    if let Err(e) = matrix.set_display_name(&ghost_user_id, display_name).await {
-        warn!(error = %e, "Failed to set ghost display name");
+    if matrix.ensure_user_exists(&localpart).await? {
+        if let Err(e) = matrix.set_display_name(&ghost_user_id, display_name).await {
+            warn!(error = %e, "Failed to set ghost display name");
+        }
     }
 
     let room_id = matrix
