@@ -1,0 +1,56 @@
+name: CI
+
+# The authoritative gate. `nix flake check` builds the package and runs every
+# check wired into the flake: clippy, rustfmt, the cargo-nextest unit suite, and
+# (x86_64 only) the email↔Matrix round-trip VM test. See ADR-0008 and AGENTS.md.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel superseded runs for the same ref (a new push to a PR supersedes the old).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  flake-check:
+    name: nix flake check (${{ matrix.system }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm # GitHub-hosted arm64 (free for public repos)
+    steps:
+      - uses: actions/checkout@v4
+
+      # The VM round-trip check (x86_64 only) is a nixosTest and needs /dev/kvm.
+      # GitHub's Linux runners ship KVM but not world-writable; this is the
+      # standard udev rule to grant the build user access.
+      - name: Enable KVM
+        if: matrix.system == 'x86_64-linux'
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      # Cachix pulls the matrix-sdk/sqlx dependency closure on every run and
+      # pushes newly built paths on `main` (fork PRs have no token → read-only).
+      - uses: cachix/cachix-action@v15
+        with:
+          name: jmap-matrix-bridge
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      - name: nix flake check
+        run: nix flake check -L

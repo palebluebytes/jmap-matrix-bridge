@@ -1,0 +1,25 @@
+name: Update flake.lock
+
+# Weekly PR bumping the Nix flake inputs (nixpkgs, crane, flake-parts, sops-nix).
+# CI then validates the bump via the standard `nix flake check` gate.
+
+on:
+  schedule:
+    - cron: "0 4 * * 1" # Mondays 04:00 UTC
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update-flake-lock:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: DeterminateSystems/update-flake-lock@main
+        with:
+          pr-title: "chore: update flake.lock"
+          commit-msg: "chore: update flake.lock"
+          branch: deps/flake-lock
