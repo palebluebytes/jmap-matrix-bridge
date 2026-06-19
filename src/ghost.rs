@@ -94,7 +94,9 @@ async fn ensure_email_space(
             let lock_key_clone = lock_key.clone();
             let _guard = scopeguard::guard((), move |()| {
                 tokio::spawn(async move {
-                    let _ = store_clone.release_room_creation_lock(&lock_key_clone).await;
+                    let _ = store_clone
+                        .release_room_creation_lock(&lock_key_clone)
+                        .await;
                 });
             });
             // Another trigger may have created it while we waited for the lock.
@@ -186,8 +188,7 @@ pub async fn handle_ghost_outbound(
 
     if let Some((jmap_thread_id, parent_id, root_event_id, latest_event_id, subject)) = thread_info
     {
-        let sender =
-            JmapSender::new(client).with_quote_replies(state.client_manager.quote_replies);
+        let sender = JmapSender::new(client).with_quote_replies(state.client_manager.quote_replies);
         let reply_subject = if subject.starts_with("Re:") {
             subject
         } else {

@@ -37,7 +37,10 @@ async fn test_auth_middleware_rejects_as_token() {
     let state = AppState {
         client_manager,
         state_store,
-        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(String::new(), "@_jmap_bot:localhost".to_string())),
+        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(
+            String::new(),
+            "@_jmap_bot:localhost".to_string(),
+        )),
         hs_token: "hs_token_456".to_string(),
     };
 
@@ -76,7 +79,10 @@ async fn test_auth_middleware_valid_hs_token() {
     let state = AppState {
         client_manager,
         state_store,
-        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(String::new(), "@_jmap_bot:localhost".to_string())),
+        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(
+            String::new(),
+            "@_jmap_bot:localhost".to_string(),
+        )),
         hs_token: "hs_token_456".to_string(),
     };
 
@@ -115,7 +121,10 @@ async fn test_auth_middleware_invalid_token() {
     let state = AppState {
         client_manager,
         state_store,
-        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(String::new(), "@_jmap_bot:localhost".to_string())),
+        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(
+            String::new(),
+            "@_jmap_bot:localhost".to_string(),
+        )),
         hs_token: "hs_token_456".to_string(),
     };
 
@@ -154,7 +163,10 @@ async fn test_auth_middleware_missing_header() {
     let state = AppState {
         client_manager,
         state_store,
-        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(String::new(), "@_jmap_bot:localhost".to_string())),
+        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(
+            String::new(),
+            "@_jmap_bot:localhost".to_string(),
+        )),
         hs_token: "hs_token_456".to_string(),
     };
 
@@ -192,7 +204,10 @@ async fn test_auth_middleware_valid_hs_token_query_param() {
     let state = AppState {
         client_manager,
         state_store,
-        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(String::new(), "@_jmap_bot:localhost".to_string())),
+        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(
+            String::new(),
+            "@_jmap_bot:localhost".to_string(),
+        )),
         hs_token: "hs_token_456".to_string(),
     };
 
@@ -230,7 +245,10 @@ async fn test_auth_middleware_rejects_as_token_query_param() {
     let state = AppState {
         client_manager,
         state_store,
-        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(String::new(), "@_jmap_bot:localhost".to_string())),
+        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(
+            String::new(),
+            "@_jmap_bot:localhost".to_string(),
+        )),
         hs_token: "hs_token_456".to_string(),
     };
 
@@ -268,7 +286,10 @@ async fn test_auth_middleware_invalid_query_param() {
     let state = AppState {
         client_manager,
         state_store,
-        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(String::new(), "@_jmap_bot:localhost".to_string())),
+        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(
+            String::new(),
+            "@_jmap_bot:localhost".to_string(),
+        )),
         hs_token: "hs_token_456".to_string(),
     };
 

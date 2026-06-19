@@ -284,8 +284,7 @@ impl ClientManager {
         // `/jmap/session`, so without trusting the connect host, discovery
         // aborts with "Aborting redirect request to unknown host". The redirect
         // is same-host, so trusting the URL's host is sufficient.
-        let mut builder =
-            Client::new().credentials((username.to_owned(), token.to_owned()));
+        let mut builder = Client::new().credentials((username.to_owned(), token.to_owned()));
         if let Some(host) = reqwest::Url::parse(url)
             .ok()
             .and_then(|u| u.host_str().map(str::to_owned))

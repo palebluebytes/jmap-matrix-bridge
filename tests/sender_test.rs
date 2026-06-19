@@ -377,9 +377,12 @@ async fn test_send_email_sets_from_header_from_identity() {
         .and(path("/api"))
         .and(|request: &wiremock::Request| {
             let json: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-            json.get("methodCalls").unwrap().as_array().unwrap().iter().any(|c| {
-                c.as_array().unwrap()[0].as_str().unwrap() == "Identity/get"
-            })
+            json.get("methodCalls")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c.as_array().unwrap()[0].as_str().unwrap() == "Identity/get")
         })
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "sessionState": "s1",
@@ -403,12 +406,27 @@ async fn test_send_email_sets_from_header_from_identity() {
             for call in calls {
                 let arr = call.as_array().unwrap();
                 if arr[0].as_str().unwrap() == "Email/set" {
-                    let draft = arr[1].as_object().unwrap().get("create").unwrap()
-                        .as_object().unwrap().get("draft").unwrap().as_object().unwrap();
-                    let from = draft.get("from").expect("Email/set create must include `from`")
-                        .as_array().unwrap();
+                    let draft = arr[1]
+                        .as_object()
+                        .unwrap()
+                        .get("create")
+                        .unwrap()
+                        .as_object()
+                        .unwrap()
+                        .get("draft")
+                        .unwrap()
+                        .as_object()
+                        .unwrap();
+                    let from = draft
+                        .get("from")
+                        .expect("Email/set create must include `from`")
+                        .as_array()
+                        .unwrap();
                     assert_eq!(from.len(), 1);
-                    assert_eq!(from[0].get("email").unwrap().as_str().unwrap(), "thomas@palebluebytes.space");
+                    assert_eq!(
+                        from[0].get("email").unwrap().as_str().unwrap(),
+                        "thomas@palebluebytes.space"
+                    );
                     assert_eq!(from[0].get("name").unwrap().as_str().unwrap(), "Thomas");
                     return true;
                 }
@@ -431,9 +449,12 @@ async fn test_send_email_sets_from_header_from_identity() {
         .and(path("/api"))
         .and(|request: &wiremock::Request| {
             let json: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
-            json.get("methodCalls").unwrap().as_array().unwrap().iter().any(|c| {
-                c.as_array().unwrap()[0].as_str().unwrap() == "Mailbox/query"
-            })
+            json.get("methodCalls")
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c.as_array().unwrap()[0].as_str().unwrap() == "Mailbox/query")
         })
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "sessionState": "s1",
@@ -452,7 +473,9 @@ async fn test_send_email_sets_from_header_from_identity() {
         .unwrap();
     let sender = JmapSender::new(std::sync::Arc::new(client));
 
-    let result = sender.send_email("to@example.com", "Subject", "Body", vec![]).await;
+    let result = sender
+        .send_email("to@example.com", "Subject", "Body", vec![])
+        .await;
     assert!(result.is_ok(), "send_email() should succeed: {result:?}");
     assert_eq!(result.unwrap(), "email-id-1");
 }
@@ -479,7 +502,11 @@ async fn send_email_errors_when_submission_is_rejected() {
         .and(path("/api"))
         .and(|r: &wiremock::Request| {
             let j: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
-            j["methodCalls"].as_array().unwrap().iter().any(|c| c[0] == "Identity/get")
+            j["methodCalls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c[0] == "Identity/get")
         })
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "methodResponses": [["Identity/get", {
@@ -497,7 +524,11 @@ async fn send_email_errors_when_submission_is_rejected() {
         .and(path("/api"))
         .and(|r: &wiremock::Request| {
             let j: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
-            j["methodCalls"].as_array().unwrap().iter().any(|c| c[0] == "Mailbox/query")
+            j["methodCalls"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|c| c[0] == "Mailbox/query")
         })
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "methodResponses": [["Mailbox/query", {
@@ -535,7 +566,9 @@ async fn send_email_errors_when_submission_is_rejected() {
         .unwrap();
     let sender = JmapSender::new(std::sync::Arc::new(client));
 
-    let result = sender.send_email("to@example.com", "Subject", "Body", vec![]).await;
+    let result = sender
+        .send_email("to@example.com", "Subject", "Body", vec![])
+        .await;
     assert!(
         result.is_err(),
         "a rejected submission must be an error, not a silent success"

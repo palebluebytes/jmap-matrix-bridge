@@ -127,12 +127,15 @@ async fn test_poll_with_mock_jmap() {
         .await;
 
     let store = Store::new_in_memory(None).await.unwrap();
-    store.save_user(&jmap_matrix_bridge::store::RegisteredUser {
-        matrix_user_id: "@user:localhost".to_string(),
-        jmap_username: "user".to_string(),
-        jmap_token: "secret".to_string(),
-        jmap_url: mock_server.uri(),
-    }).await.unwrap();
+    store
+        .save_user(&jmap_matrix_bridge::store::RegisteredUser {
+            matrix_user_id: "@user:localhost".to_string(),
+            jmap_username: "user".to_string(),
+            jmap_token: "secret".to_string(),
+            jmap_url: mock_server.uri(),
+        })
+        .await
+        .unwrap();
     let matrix = MatrixClient::new(&mock_server.uri(), "token", "localhost")
         .await
         .unwrap();

@@ -52,13 +52,17 @@ async fn add_room_to_space_writes_child_and_parent() {
     // Distinguishing by body avoids brittle percent-encoded path matching.
     Mock::given(method("PUT"))
         .and(body_partial_json(serde_json::json!({ "suggested": true })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "event_id": "$c" })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "event_id": "$c" })),
+        )
         .expect(1)
         .mount(&server)
         .await;
     Mock::given(method("PUT"))
         .and(body_partial_json(serde_json::json!({ "canonical": true })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({ "event_id": "$p" })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "event_id": "$p" })),
+        )
         .expect(1)
         .mount(&server)
         .await;
