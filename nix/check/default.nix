@@ -114,6 +114,10 @@ pkgs.testers.nixosTest {
             # proxy), so this exercises the real session-discovery path.
             url = "http://localhost:8081";
             matrixUrl = "http://127.0.0.1:${toString hsPort}";
+            # Both homeservers use server_name = "localhost"; pin the ghost domain
+            # to match (matrixDomain would otherwise derive "127.0.0.1" from the
+            # loopback matrixUrl). The assertions expect @_jmap_…:localhost ghosts.
+            matrixDomain = "localhost";
             encryptionKeyFile = "/etc/jmap-bridge-key";
             extraArgs = [
               "--jmap-username"
