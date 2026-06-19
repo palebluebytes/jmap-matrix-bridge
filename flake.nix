@@ -61,6 +61,7 @@
             .${system};
           staticBridge = muslPkgs.callPackage ./. {
             craneLib = inputs.crane.mkLib muslPkgs;
+            crtStatic = true;
           };
 
           # Minimal OCI image for non-Nix self-hosters (docker/podman/k8s). Wraps
