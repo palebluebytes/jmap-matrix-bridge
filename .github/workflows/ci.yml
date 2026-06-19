@@ -30,7 +30,7 @@ jobs:
           - system: aarch64-linux
             runner: ubuntu-24.04-arm # GitHub-hosted arm64 (free for public repos)
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The VM round-trip check (x86_64 only) is a nixosTest and needs /dev/kvm.
       # GitHub's Linux runners ship KVM but not world-writable; this is the
