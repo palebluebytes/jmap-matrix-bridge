@@ -72,7 +72,7 @@ let
   # Build and run the test suite separately in the sandbox using cargo-nextest.
   # Compiled with the dev profile (off release) for fast feedback — see
   # cargoArtifactsDev above.
-  checks = craneLib.cargoNextest (
+  cargoNextest = craneLib.cargoNextest (
     commonArgs
     // {
       cargoArtifacts = cargoArtifactsDev;
@@ -92,8 +92,31 @@ let
     }
   );
 
+  # Clippy gate. Mirrors `cargo clippy-all` (.cargo/config.toml): all targets,
+  # all features, warnings denied — so the lint groups in Cargo.toml
+  # (all/pedantic/nursery/cargo) become hard build failures in CI. Reuses the
+  # dev-profile dependency cache for fast, cached runs.
+  cargoClippy = craneLib.cargoClippy (
+    commonArgs
+    // {
+      cargoArtifacts = cargoArtifactsDev;
+      CARGO_PROFILE = "dev";
+      cargoClippyExtraArgs = "--all-targets --all-features -- -D warnings";
+    }
+  );
+
+  # Formatting gate: `cargo fmt --all -- --check`. Only needs the sources.
+  cargoFmt = craneLib.cargoFmt { inherit (commonArgs) src; };
+
+  # All non-VM checks, surfaced to the flake so a single `nix flake check`
+  # runs build + clippy + fmt + unit tests (the VM round-trip is added in
+  # flake.nix, gated to x86_64). See ADR-0008.
+  checks = {
+    inherit cargoNextest cargoClippy cargoFmt;
+  };
+
 in
-# Return the package with nextest checks bound via passthru
+# Return the package with the check derivations bound via passthru.
 package.overrideAttrs (oldAttrs: {
   passthru = (oldAttrs.passthru or { }) // {
     inherit checks;

@@ -1,0 +1,21 @@
+# release-plz configuration — see ADR-0008.
+#
+# Cadence: on-demand. On every push to `main`, release-plz keeps a
+# "chore: release vX.Y.Z" PR up to date (version bump + CHANGELOG.md generated
+# from the Conventional Commits history). Cutting a release = merging that PR,
+# which tags vX.Y.Z and creates the GitHub Release.
+#
+# Pre-1.0 versioning: breaking changes bump the minor (0.x.0), feat/fix bump the
+# patch (0.x.y) — release-plz's default semver behaviour for 0.x crates.
+
+[workspace]
+# This is a self-hosted appservice binary. Distribution is the Nix flake
+# (overlay + NixOS module) plus GitHub Releases — never crates.io.
+publish = false
+
+# Cut the tag + GitHub Release (with the changelog body) when the release PR
+# merges, and keep CHANGELOG.md maintained. (These are defaults; pinned for
+# clarity of intent.)
+git_release_enable = true
+git_tag_enable = true
+changelog_update = true

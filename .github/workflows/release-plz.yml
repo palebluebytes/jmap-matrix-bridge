@@ -1,0 +1,43 @@
+name: Release-plz
+
+# On every push to main, release-plz runs two things:
+#   • release-pr — opens/updates the "release vX.Y.Z" PR (version bump + CHANGELOG)
+#   • release    — when the release PR has merged (Cargo.toml version changed),
+#                  creates the vX.Y.Z tag + GitHub Release.
+# See ADR-0008 and release-plz.toml.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# Never cancel a release mid-flight; serialize runs on main instead.
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-plz:
+    name: release-plz
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history is required to build the changelog
+          # A PAT or GitHub App token (NOT the default GITHUB_TOKEN): the tag this
+          # job pushes must be able to trigger release-artifacts.yml, and the
+          # release PR's CI must run — neither happens for GITHUB_TOKEN events.
+          token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+
+      # release-plz drives cargo to compute version bumps and edit Cargo.toml.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run release-plz
+        uses: release-plz/action@v0
+        # No `command:` → runs both `release-pr` and `release`.
+        env:
+          GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
+          # No CARGO_REGISTRY_TOKEN — publish = false (no crates.io).

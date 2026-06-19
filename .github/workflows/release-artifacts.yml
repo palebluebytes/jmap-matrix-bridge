@@ -1,0 +1,86 @@
+name: Release artifacts
+
+# Fires when release-plz pushes a vX.Y.Z tag (via the PAT in release-plz.yml).
+# Builds the static binaries and OCI images from the flake for both arches,
+# attaches the binaries to the GitHub Release, and publishes a multi-arch image
+# to ghcr.io. See ADR-0008.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch: # allow re-running against an existing tag ref
+
+permissions:
+  contents: write # upload release assets
+  packages: write # push images to ghcr.io
+
+jobs:
+  build:
+    name: build ${{ matrix.system }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-latest
+            arch: amd64
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+      - uses: cachix/cachix-action@v15
+        with:
+          name: jmap-matrix-bridge
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+      # ── Static binary → GitHub Release asset ───────────────────────────────
+      - name: Build static binary
+        run: nix build .#static -L
+
+      - name: Stage binary + checksum
+        run: |
+          bin="jmap-matrix-bridge-${GITHUB_REF_NAME}-${{ matrix.system }}"
+          install -m755 result/bin/jmap-matrix-bridge "$bin"
+          sha256sum "$bin" > "$bin.sha256"
+
+      - name: Upload binary to the release
+        run: |
+          bin="jmap-matrix-bridge-${GITHUB_REF_NAME}-${{ matrix.system }}"
+          gh release upload "$GITHUB_REF_NAME" "$bin" "$bin.sha256" --clobber
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      # ── Per-arch OCI image → ghcr.io ───────────────────────────────────────
+      - name: Build OCI image
+        run: nix build .#dockerImage -L -o image.tar.gz
+
+      - name: Push per-arch image
+        run: |
+          echo "${{ github.token }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          img="ghcr.io/${{ github.repository }}"
+          docker load < image.tar.gz
+          docker tag jmap-matrix-bridge:latest "$img:${GITHUB_REF_NAME}-${{ matrix.arch }}"
+          docker push "$img:${GITHUB_REF_NAME}-${{ matrix.arch }}"
+
+  manifest:
+    name: multi-arch manifest
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    env:
+      DOCKER_CLI_EXPERIMENTAL: enabled
+    steps:
+      - name: Combine per-arch images into a multi-arch tag
+        run: |
+          echo "${{ github.token }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          img="ghcr.io/${{ github.repository }}"
+          tag="${GITHUB_REF_NAME}"
+          for target in "$tag" latest; do
+            docker manifest create "$img:$target" \
+              "$img:$tag-amd64" "$img:$tag-arm64"
+            docker manifest push "$img:$target"
+          done
