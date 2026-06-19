@@ -43,13 +43,16 @@ is bundled C.
   and `rustfmt` — the tree was brought to a clean `cargo fmt` + clippy baseline when
   these gates were introduced (the lints in `Cargo.toml` were previously unenforced).
   Run `just lint` (or `nix flake check`) before pushing.
-- **A few one-time secrets/settings are required** and cannot live in the repo: a Cachix
-  cache + `CACHIX_AUTH_TOKEN` (CI would otherwise rebuild the matrix-sdk closure every
-  run); a `RELEASE_PLZ_TOKEN` PAT/App token so the pushed tag triggers the artifact
-  build and the release PR's CI runs (the default `GITHUB_TOKEN` triggers neither);
-  the repo "Allow GitHub Actions to create … pull requests" setting; and public
-  visibility on the first `ghcr.io` push. These are listed in the CI/Releases section
-  of `AGENTS.md`.
+- **Two one-time secrets are required** and cannot live in the repo (set them as GitHub
+  Actions repository secrets — a `.env` file is *not* read by Actions): a Cachix cache +
+  `CACHIX_AUTH_TOKEN` (CI would otherwise rebuild the matrix-sdk closure every run); and a
+  `RELEASE_PLZ_TOKEN` PAT/App token used by both `release-plz` and `update-flake-lock` so
+  their PRs trigger CI and the pushed release tag triggers the artifact build (the default
+  `GITHUB_TOKEN` triggers none of these). Because every PR-opening workflow uses that PAT,
+  the org/repo "Allow GitHub Actions to create … pull requests" setting is **not** needed
+  (it only governs the default token). One non-secret step remains: make the package
+  public on the first `ghcr.io` push. These are listed in the CI/Releases section of
+  `AGENTS.md`.
 - **The VM round-trip test runs on every PR.** It is the slow part; with Cachix the
   bridge build is warm and only the VM boot remains. If PR latency becomes a problem,
   gate the VM check to `push: main` rather than dropping it.
