@@ -113,12 +113,15 @@ async fn test_poll_hits_jmap_and_matrix_endpoints() {
         .await;
 
     let store = Store::new_in_memory(None).await.unwrap();
-    store.save_user(&jmap_matrix_bridge::store::RegisteredUser {
-        matrix_user_id: "@user:localhost".to_string(),
-        jmap_username: "user".to_string(),
-        jmap_token: "secret".to_string(),
-        jmap_url: mock_server.uri(),
-    }).await.unwrap();
+    store
+        .save_user(&jmap_matrix_bridge::store::RegisteredUser {
+            matrix_user_id: "@user:localhost".to_string(),
+            jmap_username: "user".to_string(),
+            jmap_token: "secret".to_string(),
+            jmap_url: mock_server.uri(),
+        })
+        .await
+        .unwrap();
     let matrix = MatrixClient::new(&mock_server.uri(), "token", "localhost")
         .await
         .unwrap();
@@ -246,12 +249,15 @@ async fn test_poll_respects_sync_limit() {
         .await;
 
     let store = Store::new_in_memory(None).await.unwrap();
-    store.save_user(&jmap_matrix_bridge::store::RegisteredUser {
-        matrix_user_id: "@user:localhost".to_string(),
-        jmap_username: "user".to_string(),
-        jmap_token: "secret".to_string(),
-        jmap_url: mock_server.uri(),
-    }).await.unwrap();
+    store
+        .save_user(&jmap_matrix_bridge::store::RegisteredUser {
+            matrix_user_id: "@user:localhost".to_string(),
+            jmap_username: "user".to_string(),
+            jmap_token: "secret".to_string(),
+            jmap_url: mock_server.uri(),
+        })
+        .await
+        .unwrap();
     let matrix = MatrixClient::new(&mock_server.uri(), "token", "localhost")
         .await
         .unwrap();
@@ -427,12 +433,15 @@ async fn test_poll_handles_html_email() {
         .await;
 
     let store = Store::new_in_memory(None).await.unwrap();
-    store.save_user(&jmap_matrix_bridge::store::RegisteredUser {
-        matrix_user_id: "@user:localhost".to_string(),
-        jmap_username: "user".to_string(),
-        jmap_token: "secret".to_string(),
-        jmap_url: mock_server.uri(),
-    }).await.unwrap();
+    store
+        .save_user(&jmap_matrix_bridge::store::RegisteredUser {
+            matrix_user_id: "@user:localhost".to_string(),
+            jmap_username: "user".to_string(),
+            jmap_token: "secret".to_string(),
+            jmap_url: mock_server.uri(),
+        })
+        .await
+        .unwrap();
     let matrix = MatrixClient::new(&mock_server.uri(), "token", "localhost")
         .await
         .unwrap();

@@ -70,12 +70,7 @@ impl Command for ComposeCommand {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
             let Some((address, subject_opt)) = parse_compose(ctx.body_str) else {
-                notify(
-                    state,
-                    ctx.room_id,
-                    "Usage: !compose <address> [subject]",
-                )
-                .await;
+                notify(state, ctx.room_id, "Usage: !compose <address> [subject]").await;
                 return Ok(());
             };
 
@@ -90,7 +85,12 @@ impl Command for ComposeCommand {
             }
 
             // Must have a JMAP session to send from.
-            if state.client_manager.get_client(ctx.sender_id).await.is_none() {
+            if state
+                .client_manager
+                .get_client(ctx.sender_id)
+                .await
+                .is_none()
+            {
                 notify(
                     state,
                     ctx.room_id,

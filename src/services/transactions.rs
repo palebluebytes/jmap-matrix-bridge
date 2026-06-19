@@ -102,7 +102,8 @@ pub async fn process_transaction(
                 // network I/O, so run it detached rather than blocking the
                 // transaction ACK (a homeserver retry would dedupe anyway).
                 if let matrix_sdk::ruma::events::AnyMessageLikeEvent::Reaction(reaction) = &e
-                    && let Some(annotation) = reaction.as_original().map(|ev| &ev.content.relates_to)
+                    && let Some(annotation) =
+                        reaction.as_original().map(|ev| &ev.content.relates_to)
                     && crate::services::images::is_load_images_reaction(&annotation.key)
                 {
                     if let Some(rm_id) = room_id.as_deref() {

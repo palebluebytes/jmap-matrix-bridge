@@ -27,7 +27,7 @@ impl Store {
              ON CONFLICT(matrix_user_id) DO UPDATE SET \
                  jmap_username = excluded.jmap_username, \
                  jmap_token = excluded.jmap_token, \
-                 jmap_url = excluded.jmap_url"
+                 jmap_url = excluded.jmap_url",
         )
         .bind(&user.matrix_user_id)
         .bind(&username)
@@ -81,7 +81,8 @@ impl Store {
     /// Store the user's own primary email address (from their JMAP identity),
     /// used to label their email space. Plaintext in the kv table.
     pub async fn set_user_email(&self, matrix_user_id: &str, email: &str) -> Result<()> {
-        self.save_jmap_state(matrix_user_id, "user_email", email).await
+        self.save_jmap_state(matrix_user_id, "user_email", email)
+            .await
     }
 
     /// Read the user's own primary email address, if known.
@@ -98,7 +99,8 @@ impl Store {
 
     /// Read the user's email space room id, if it has been created.
     pub async fn get_email_space_room(&self, matrix_user_id: &str) -> Result<Option<String>> {
-        self.get_jmap_state(matrix_user_id, "email_space_room").await
+        self.get_jmap_state(matrix_user_id, "email_space_room")
+            .await
     }
 
     /// key is configured. Reuses the generic state kv table so no schema change

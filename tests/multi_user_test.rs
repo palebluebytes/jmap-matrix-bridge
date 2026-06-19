@@ -55,7 +55,10 @@ async fn test_multi_user_login_integration() {
     let state = routes::AppState {
         client_manager,
         state_store,
-        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(String::new(), "@_jmap_bot:localhost".to_string())),
+        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(
+            String::new(),
+            "@_jmap_bot:localhost".to_string(),
+        )),
         hs_token: "hs_token".to_string(),
     };
     let app = Router::new()
@@ -112,18 +115,24 @@ async fn test_ghost_room_mapping_isolation() {
         .expect("Failed to create store");
 
     // Register users to satisfy foreign key constraints
-    store.save_user(&jmap_matrix_bridge::store::RegisteredUser {
-        matrix_user_id: "@alice:localhost".to_string(),
-        jmap_username: "alice".to_string(),
-        jmap_token: "secret".to_string(),
-        jmap_url: "http://localhost".to_string(),
-    }).await.unwrap();
-    store.save_user(&jmap_matrix_bridge::store::RegisteredUser {
-        matrix_user_id: "@charlie:localhost".to_string(),
-        jmap_username: "charlie".to_string(),
-        jmap_token: "secret".to_string(),
-        jmap_url: "http://localhost".to_string(),
-    }).await.unwrap();
+    store
+        .save_user(&jmap_matrix_bridge::store::RegisteredUser {
+            matrix_user_id: "@alice:localhost".to_string(),
+            jmap_username: "alice".to_string(),
+            jmap_token: "secret".to_string(),
+            jmap_url: "http://localhost".to_string(),
+        })
+        .await
+        .unwrap();
+    store
+        .save_user(&jmap_matrix_bridge::store::RegisteredUser {
+            matrix_user_id: "@charlie:localhost".to_string(),
+            jmap_username: "charlie".to_string(),
+            jmap_token: "secret".to_string(),
+            jmap_url: "http://localhost".to_string(),
+        })
+        .await
+        .unwrap();
 
     // Add room ghost mapping for User A
     store

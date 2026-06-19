@@ -84,7 +84,10 @@ mod tests {
     async fn test_compose_command_matching() {
         let router = CommandRouter::new();
 
-        for body in ["!compose new@example.com Subject", "!email-to new@example.com"] {
+        for body in [
+            "!compose new@example.com Subject",
+            "!email-to new@example.com",
+        ] {
             let content = RoomMessageEventContent::text_plain(body);
             let ctx = CommandContext {
                 sender_id: "@alice:localhost",

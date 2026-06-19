@@ -72,7 +72,15 @@ pub(crate) async fn handle_load_images_reaction(
     };
 
     let plain = content::EmailBody::from_email(&email, content::RenderMode::Plain).plain;
-    inline_email_images(matrix, room_id, reacted_event_id, &ghost_user_id, &html, &plain).await
+    inline_email_images(
+        matrix,
+        room_id,
+        reacted_event_id,
+        &ghost_user_id,
+        &html,
+        &plain,
+    )
+    .await
 }
 
 /// Download an email's non-tracker remote images, upload each to the homeserver,
@@ -97,7 +105,10 @@ async fn inline_email_images(
         return Ok(());
     }
 
-    info!(count = candidates.len(), "Loading inline images on user request");
+    info!(
+        count = candidates.len(),
+        "Loading inline images on user request"
+    );
     let mut url_to_mxc: HashMap<String, String> = HashMap::new();
     for img in candidates {
         let fetch_url = content::decode_src_entities(&img.url);
@@ -117,7 +128,10 @@ async fn inline_email_images(
     matrix
         .send_edit_as(room_id, reacted_event_id, plain, &rich, ghost_user_id)
         .await?;
-    info!(loaded = url_to_mxc.len(), "Edited message with inline images");
+    info!(
+        loaded = url_to_mxc.len(),
+        "Edited message with inline images"
+    );
     Ok(())
 }
 
@@ -172,7 +186,10 @@ async fn fetch_and_upload(
     if !mime.starts_with("image/") {
         anyhow::bail!("not an image (content-type {mime:?})");
     }
-    if resp.content_length().is_some_and(|len| len > MAX_IMAGE_BYTES) {
+    if resp
+        .content_length()
+        .is_some_and(|len| len > MAX_IMAGE_BYTES)
+    {
         anyhow::bail!("image too large");
     }
     let bytes = resp.bytes().await?;
@@ -244,7 +261,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        let matrix = MatrixClient::new(&uri, "as_token", "localhost").await.unwrap();
+        let matrix = MatrixClient::new(&uri, "as_token", "localhost")
+            .await
+            .unwrap();
         super::inline_email_images(
             &matrix,
             "!room:localhost",
@@ -263,7 +282,10 @@ mod tests {
             "1x1 tracker must not be downloaded"
         );
         // The content image was, and the message was edited carrying its mxc.
-        assert!(reqs.iter().any(|r| r.url.path() == "/img.png"), "content image fetched");
+        assert!(
+            reqs.iter().any(|r| r.url.path() == "/img.png"),
+            "content image fetched"
+        );
         let edit = reqs
             .iter()
             .find(|r| r.url.path().contains("/send/m.room.message/"))

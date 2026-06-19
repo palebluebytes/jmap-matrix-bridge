@@ -21,12 +21,15 @@ async fn test_signature_database_operations() {
     let user_id = "@alice:localhost";
 
     // Register user to satisfy foreign key constraint
-    store.save_user(&jmap_matrix_bridge::store::RegisteredUser {
-        matrix_user_id: user_id.to_string(),
-        jmap_username: "alice".to_string(),
-        jmap_token: "secret".to_string(),
-        jmap_url: "http://localhost".to_string(),
-    }).await.unwrap();
+    store
+        .save_user(&jmap_matrix_bridge::store::RegisteredUser {
+            matrix_user_id: user_id.to_string(),
+            jmap_username: "alice".to_string(),
+            jmap_token: "secret".to_string(),
+            jmap_url: "http://localhost".to_string(),
+        })
+        .await
+        .unwrap();
 
     // 1. Get when no signature is set
     let sig = store.get_user_signature(user_id).await.unwrap();
@@ -53,12 +56,15 @@ async fn test_signature_commands() {
     let user_id = "@bob:localhost";
 
     // Register user to satisfy foreign key constraint
-    store.save_user(&jmap_matrix_bridge::store::RegisteredUser {
-        matrix_user_id: user_id.to_string(),
-        jmap_username: "bob".to_string(),
-        jmap_token: "secret".to_string(),
-        jmap_url: mock_server.uri(),
-    }).await.unwrap();
+    store
+        .save_user(&jmap_matrix_bridge::store::RegisteredUser {
+            matrix_user_id: user_id.to_string(),
+            jmap_username: "bob".to_string(),
+            jmap_token: "secret".to_string(),
+            jmap_url: mock_server.uri(),
+        })
+        .await
+        .unwrap();
 
     let matrix = MatrixClient::new(&mock_server.uri(), "token", "localhost")
         .await
@@ -69,7 +75,10 @@ async fn test_signature_commands() {
     let state = AppState {
         client_manager: Arc::new(client_manager),
         state_store: Arc::new(state_store),
-        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(String::new(), "@_jmap_bot:localhost".to_string())),
+        puppet_manager: std::sync::Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(
+            String::new(),
+            "@_jmap_bot:localhost".to_string(),
+        )),
         hs_token: "hs_token".to_string(),
     };
 

@@ -215,18 +215,17 @@ impl JmapSender {
             .next()?;
 
         // Attribution: prefer "Name <addr>", fall back to the bare address.
-        let from = email.from().and_then(|f| f.first()).map_or_else(
-            String::new,
-            |addr| {
+        let from = email
+            .from()
+            .and_then(|f| f.first())
+            .map_or_else(String::new, |addr| {
                 addr.name().map_or_else(
                     || addr.email().to_owned(),
                     |name| format!("{name} <{}>", addr.email()),
                 )
-            },
-        );
-        let date = crate::services::content::format_utc(
-            email.sent_at().or_else(|| email.received_at())?,
-        );
+            });
+        let date =
+            crate::services::content::format_utc(email.sent_at().or_else(|| email.received_at())?);
         let body = email
             .text_body()
             .and_then(|parts| parts.first())
@@ -522,10 +521,10 @@ impl JmapSender {
         // it the Sent copy comes back senderless and gets re-bridged as a bogus
         // `unknown@sender` room. Fall back to the session username only if the
         // account exposes no identity.
-        let (identity_id, from_name, from_email) =
-            self.primary_identity().await.unwrap_or_else(|| {
-                (None, None, self.client.session().username().to_owned())
-            });
+        let (identity_id, from_name, from_email) = self
+            .primary_identity()
+            .await
+            .unwrap_or_else(|| (None, None, self.client.session().username().to_owned()));
         let from_addr: jmap_client::email::EmailAddress = from_name.map_or_else(
             || from_email.clone().into(),
             |name| (name, from_email.clone()).into(),
