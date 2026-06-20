@@ -57,6 +57,17 @@ runs on *every* push to `main` and cuts a release whenever it finds a version wi
 tag; a manual bump in an ordinary PR would therefore **auto-ship** on merge (and break the
 pre-1.0 patch/minor semantic above). Let the release PR own the bump.
 
+**Why `git_only = true` (and what it costs).** release-plz computes the next version by diffing
+the crate against its *registry-published* version. This crate is `publish = false` and was never
+on crates.io, so there is no such baseline: release-plz silently kept proposing the current
+version (it never bumped past `0.2.0`). `git_only` makes it use the last **git tag** as the
+baseline instead — which is the right model for a binary released via tags. The cost is that
+git-only mode runs `cargo package` (a verify build) during version detection, so the release-plz
+job now *compiles the crate*; `release-plz.yml` adds `rust-cache` + a pinned `CARGO_TARGET_DIR`
+so that compile is cached rather than paid on every push. (`v0.2.1` was a one-time hand bump —
+the sanctioned exception — because `git_only` only landed afterward, so its tag could become the
+baseline for everything after.)
+
 **When to cut `1.0`.** Stay in `0.x` deliberately — it honestly signals "expect breakage, read
 changelogs," and release-plz never leaves `0.x` on its own. Cut `1.0` only when all three hold:
 (a) the **config/registration contract is settled** — the leading indicator is that *the minor

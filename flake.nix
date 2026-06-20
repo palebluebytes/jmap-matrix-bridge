@@ -92,15 +92,20 @@
           # the tooling AGENTS.md documents plus `gh` for issue-tracker workflows.
           devShells.default = craneLib.devShell {
             inputsFrom = [ bridge ];
+
+            # Use the fast `mold` linker for interactive dev builds. Set in the
+            # shell ENV rather than committed to `.cargo/config.toml` on purpose:
+            # a committed `-fuse-ld=mold` is read by every raw `cargo` (CI,
+            # release-plz's `cargo package`) and fails wherever mold is absent.
+            # Scoping it to the dev shell keeps mold a dev-only concern; the
+            # hermetic package build is unaffected (it strips `.cargo`).
+            CARGO_BUILD_RUSTFLAGS = "-C link-arg=-fuse-ld=mold";
+
             packages = with pkgs; [
               cargo-nextest
               bacon
               just
               gh
-              # Interactive `cargo build` honours `.cargo/config.toml`, which sets
-              # `-fuse-ld=mold`; provide mold here so the dev linker resolves. The
-              # hermetic package build strips `.cargo` (see default.nix src filter)
-              # and stays on the default linker, so it needs no mold.
               mold
             ];
           };

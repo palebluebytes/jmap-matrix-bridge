@@ -1,8 +1,11 @@
 # Cargo Configuration for JMAP-Matrix Bridge
 
-# Use the extremely fast mold linker on Linux for development builds
-[target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "link-arg=-fuse-ld=mold"]
+# NOTE: the `mold` dev linker is intentionally NOT configured here. A committed
+# `rustflags = -fuse-ld=mold` is read by every raw `cargo` invocation — including
+# release-plz's `cargo package` (which runs on the unprivileged CI runner without
+# mold) — and broke them. The flag now lives in the devShell's environment
+# (flake.nix), so it applies to interactive dev builds only. The hermetic Nix
+# package build strips `.cargo` entirely; see ADR-0008.
 
 [alias]
 # Fast and thorough Clippy check on all targets (lib, bin, integration tests)
