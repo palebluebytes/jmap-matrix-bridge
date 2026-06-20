@@ -91,17 +91,47 @@ cargo build --release
 
 Each tagged release (see [Releases](https://github.com/palebluebytes/jmap-matrix-bridge/releases))
 ships a standalone **static binary** for `x86_64-linux` and `aarch64-linux` plus a
-**multi-arch container image**:
+**multi-arch container image** on `ghcr.io` (public — no login required).
+
+#### Container image (Docker / Podman / k8s)
 
 ```bash
-# Container (Docker/Podman/k8s)
-docker pull ghcr.io/palebluebytes/jmap-matrix-bridge:latest
-docker run --rm ghcr.io/palebluebytes/jmap-matrix-bridge:latest run --help
+# Pin a version (recommended for production) — or use :latest to track newest
+docker pull ghcr.io/palebluebytes/jmap-matrix-bridge:v0.2.0
+docker run --rm ghcr.io/palebluebytes/jmap-matrix-bridge:v0.2.0 run --help
+```
 
-# Static binary (no Nix/Docker required)
-curl -fsSL -o jmap-matrix-bridge \
-  https://github.com/palebluebytes/jmap-matrix-bridge/releases/latest/download/jmap-matrix-bridge-vX.Y.Z-x86_64-linux
-chmod +x jmap-matrix-bridge
+The image is a multi-arch manifest, so `docker`/`podman` auto-selects `linux/amd64`
+or `linux/arm64`. `:latest` is mutable (overwritten each release); pin `:vX.Y.Z` (or
+a digest) for reproducible/security-sensitive deployments.
+
+#### Static binary (no Nix/Docker required)
+
+Pick your release tag and architecture (`x86_64-linux` or `aarch64-linux`):
+
+```bash
+TAG=v0.2.0 ARCH=x86_64-linux
+base="https://github.com/palebluebytes/jmap-matrix-bridge/releases/download/$TAG"
+curl -fsSL -O "$base/jmap-matrix-bridge-$TAG-$ARCH"
+curl -fsSL -O "$base/jmap-matrix-bridge-$TAG-$ARCH.sha256"
+sha256sum -c "jmap-matrix-bridge-$TAG-$ARCH.sha256"   # integrity check
+install -m755 "jmap-matrix-bridge-$TAG-$ARCH" jmap-matrix-bridge
+```
+
+#### Verify provenance (optional, recommended)
+
+Both artifact types carry a keyless [build-provenance attestation](https://docs.github.com/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds)
+— proof the bytes were built by this repo's release workflow (the `.sha256` only
+proves integrity). Verify with the [`gh` CLI](https://cli.github.com/):
+
+```bash
+# Binary
+gh attestation verify jmap-matrix-bridge \
+  --repo palebluebytes/jmap-matrix-bridge
+
+# Container image (by tag or digest)
+gh attestation verify oci://ghcr.io/palebluebytes/jmap-matrix-bridge:v0.2.0 \
+  --repo palebluebytes/jmap-matrix-bridge
 ```
 
 For Nix consumers, the flake exposes `overlays.default` and
