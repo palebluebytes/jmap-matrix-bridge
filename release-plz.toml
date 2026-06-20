@@ -13,6 +13,16 @@
 # (overlay + NixOS module) plus GitHub Releases — never crates.io.
 publish = false
 
+# Determine the previous version from git TAGS, not the cargo registry. By
+# default release-plz diffs the crate against its crates.io-published version to
+# compute the next version; an unpublished (`publish = false`) crate has no such
+# baseline, so release-plz never bumped past the current Cargo.toml — it would
+# keep proposing 0.2.0 forever. git-only mode uses the last tag as the baseline
+# instead. Trade-off: this mode runs `cargo package` (a verify build) during
+# version detection, so the release-plz job now compiles the crate — hence the
+# rust-cache + CARGO_TARGET_DIR in release-plz.yml. See ADR-0008.
+git_only = true
+
 # Cut the tag + GitHub Release (with the changelog body) when the release PR
 # merges, and keep CHANGELOG.md maintained. (These are defaults; pinned for
 # clarity of intent.)

@@ -35,9 +35,18 @@ jobs:
       # release-plz drives cargo to compute version bumps and edit Cargo.toml.
       - uses: dtolnay/rust-toolchain@stable
 
+      # `git_only` mode (release-plz.toml) makes release-plz run `cargo package`
+      # — a verify build of the crate — during version detection. Cache the
+      # cargo registry + a fixed target dir so that compile is paid once, not on
+      # every push to main. CARGO_TARGET_DIR pins the build output to the
+      # workspace `target/` (release-plz packages into a temp worktree, which
+      # would otherwise be uncacheable); rust-cache caches that by default.
+      - uses: Swatinem/rust-cache@v2
+
       - name: Run release-plz
         uses: release-plz/action@v0.5
         # No `command:` → runs both `release-pr` and `release`.
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
           # No CARGO_REGISTRY_TOKEN — publish = false (no crates.io).
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
