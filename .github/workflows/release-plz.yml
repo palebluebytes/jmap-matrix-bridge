@@ -36,7 +36,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Run release-plz
-        uses: release-plz/action@v0
+        uses: release-plz/action@v0.5
         # No `command:` → runs both `release-pr` and `release`.
         env:
           GITHUB_TOKEN: ${{ secrets.RELEASE_PLZ_TOKEN }}
