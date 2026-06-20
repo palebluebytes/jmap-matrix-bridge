@@ -74,8 +74,8 @@ When generating or refactoring code, you MUST adhere to the following constraint
 
 Releases are automated with **release-plz** (on-demand cadence). Conventional Commit subjects (`feat:`/`fix:`/`refactor:`/…) drive everything — write them accordingly.
 
-* Every push to `main` updates a **"release vX.Y.Z" PR** (version bump + `CHANGELOG.md`). **Cutting a release = merging that PR**, which tags `vX.Y.Z` and creates the GitHub Release. Pre-1.0: breaking → `0.x.0`, feat/fix → `0.x.y`.
-* The tag triggers `release-artifacts.yml`: static (musl) binaries per arch on the Release, plus a multi-arch OCI image on `ghcr.io` (built from `nix build .#static` / `.#dockerImage`). No crates.io publish.
+* Every push to `main` updates a **"release vX.Y.Z" PR** (version bump + `CHANGELOG.md`). **Cutting a release = merging that PR**, which tags `vX.Y.Z` and creates the GitHub Release. Pre-1.0: breaking → `0.x.0`, feat/fix → `0.x.y` (so pre-1.0 a **minor bump = operator-action signal**; "breaking" here means a DB migration, config/CLI/env change, or NixOS-module-option change — see ADR-0008). **Never hand-edit the version in `Cargo.toml`** — release-plz owns it, and a stray bump auto-ships on merge.
+* The tag triggers `release-artifacts.yml`: static (musl) binaries per arch on the Release, plus a multi-arch OCI image on `ghcr.io` (built from `nix build .#static` / `.#dockerImage`), each carrying a **build-provenance attestation** (`gh attestation verify`). No crates.io publish.
 * Full rationale + the one-time secret/setup checklist (Cachix `CACHIX_AUTH_TOKEN`, `RELEASE_PLZ_TOKEN`, ghcr visibility) are in [ADR-0008](docs/adr/0008-ci-and-release-flow.md).
 
 ---
