@@ -18,6 +18,11 @@ jobs:
   build:
     name: build ${{ matrix.system }}
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write # upload release assets
+      packages: write # push images to ghcr.io
+      id-token: write # OIDC for build-provenance attestation
+      attestations: write # record the attestation
     strategy:
       fail-fast: false
       matrix:
@@ -46,6 +51,15 @@ jobs:
           install -m755 result/bin/jmap-matrix-bridge "$bin"
           sha256sum "$bin" > "$bin.sha256"
 
+      # Provenance attestation: proves the binary was built by THIS workflow from
+      # this repo/commit, verifiable with `gh attestation verify <bin> --repo
+      # palebluebytes/jmap-matrix-bridge`. The .sha256 only proves integrity; this
+      # proves authenticity (keyless via OIDC/Sigstore — no key to manage).
+      - name: Attest binary provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: jmap-matrix-bridge-${{ github.ref_name }}-${{ matrix.system }}
+
       - name: Upload binary to the release
         run: |
           bin="jmap-matrix-bridge-${GITHUB_REF_NAME}-${{ matrix.system }}"
@@ -70,17 +84,35 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     permissions:
-      packages: write
+      packages: write # push the manifest + attestation referrer
+      id-token: write # OIDC for build-provenance attestation
+      attestations: write # record the attestation
     env:
       DOCKER_CLI_EXPERIMENTAL: enabled
     steps:
       - name: Combine per-arch images into a multi-arch tag
+        id: manifest
         run: |
           echo "${{ github.token }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
           img="ghcr.io/${{ github.repository }}"
           tag="${GITHUB_REF_NAME}"
+          # Both :tag and :latest reference the same index, so they share one
+          # digest — capture it (last sha256 line) for the attestation subject.
+          digest=""
           for target in "$tag" latest; do
             docker manifest create "$img:$target" \
               "$img:$tag-amd64" "$img:$tag-arm64"
-            docker manifest push "$img:$target"
+            digest=$(docker manifest push "$img:$target" | grep -oE 'sha256:[a-f0-9]+' | tail -n1)
           done
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      # Attest the multi-arch index by digest — this is what `pull ghcr.io/...:vX.Y.Z`
+      # resolves to, so `gh attestation verify oci://...:vX.Y.Z` (or cosign) verifies
+      # the image an operator actually runs. push-to-registry stores it as a referrer
+      # using the docker login above.
+      - name: Attest image provenance
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-name: ghcr.io/${{ github.repository }}
+          subject-digest: ${{ steps.manifest.outputs.digest }}
+          push-to-registry: true
