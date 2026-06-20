@@ -16,6 +16,10 @@ use jmap_matrix_bridge::{client_manager, config, matrix, store};
 use std::sync::Arc;
 use tracing::{info, warn};
 
+/// Display name applied to the bridge bot user (`@_jmap_bot:…`). Applied on
+/// startup only when it differs from the last value persisted in `bridge_state`.
+const BOT_DISPLAY_NAME: &str = "JMAP Bridge";
+
 /// Resolve a secret from an inline value or a file path, preferring the file and
 /// rejecting both-at-once. Keeps tokens out of argv/env where a `*-file` is used.
 /// Returns `None` only when neither source is given.
@@ -402,18 +406,85 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
-            // Set display name and avatar
+            // Set display name and avatar — but only when they differ from what
+            // we last applied. A restart must not re-upload the avatar (each
+            // upload mints a fresh `mxc`, orphaning the previous media on the
+            // homeserver) or rewrite an unchanged profile. We persist the
+            // applied display name and the avatar's content hash + resulting
+            // `mxc`, mirroring how mautrix bridges track `AvatarHash`/`AvatarMXC`
+            // to keep profile application idempotent.
             let bot_user_id = matrix.bot_user_id();
-            if let Err(e) = matrix.set_display_name(&bot_user_id, "JMAP Bridge").await {
-                tracing::warn!("Failed to set display name: {}", e);
+
+            let display_name_current = store
+                .get_bridge_state("bot_displayname")
+                .await
+                .ok()
+                .flatten();
+            if display_name_current.as_deref() != Some(BOT_DISPLAY_NAME) {
+                match matrix
+                    .set_display_name(&bot_user_id, BOT_DISPLAY_NAME)
+                    .await
+                {
+                    Ok(()) => {
+                        if let Err(e) = store
+                            .set_bridge_state("bot_displayname", BOT_DISPLAY_NAME)
+                            .await
+                        {
+                            tracing::warn!("Failed to persist bot display name state: {}", e);
+                        }
+                    }
+                    Err(e) => tracing::warn!("Failed to set display name: {}", e),
+                }
             }
 
             let logo_bytes = include_bytes!("../assets/logo.png");
-            if let Err(e) = matrix
-                .set_avatar(&bot_user_id, logo_bytes, "image/png")
+            let logo_hash = {
+                use sha2::{Digest, Sha256};
+                use std::fmt::Write as _;
+                let digest = Sha256::digest(logo_bytes);
+                digest
+                    .iter()
+                    .fold(String::with_capacity(digest.len() * 2), |mut acc, b| {
+                        let _ = write!(acc, "{b:02x}");
+                        acc
+                    })
+            };
+            // Skip the upload entirely when this exact image is already applied
+            // (recorded hash matches and we have the resulting mxc on file).
+            let avatar_up_to_date = store
+                .get_bridge_state("bot_avatar_hash")
                 .await
-            {
-                tracing::warn!("Failed to set avatar: {}", e);
+                .ok()
+                .flatten()
+                .as_deref()
+                == Some(logo_hash.as_str())
+                && store
+                    .get_bridge_state("bot_avatar_mxc")
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some();
+            if avatar_up_to_date {
+                info!("Bot avatar already up to date (hash {logo_hash}); skipping upload");
+            } else {
+                match matrix
+                    .set_avatar(&bot_user_id, logo_bytes, "image/png")
+                    .await
+                {
+                    Ok(mxc) => {
+                        // Persist the mxc first; only then the hash, so a partial
+                        // write just re-uploads next time rather than recording a
+                        // hash with no media behind it.
+                        if let Err(e) = store.set_bridge_state("bot_avatar_mxc", &mxc).await {
+                            tracing::warn!("Failed to persist bot avatar mxc: {}", e);
+                        } else if let Err(e) =
+                            store.set_bridge_state("bot_avatar_hash", &logo_hash).await
+                        {
+                            tracing::warn!("Failed to persist bot avatar hash: {}", e);
+                        }
+                    }
+                    Err(e) => tracing::warn!("Failed to set avatar: {}", e),
+                }
             }
 
             // Start manager (loads users from DB)
