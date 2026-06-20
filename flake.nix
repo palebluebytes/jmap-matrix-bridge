@@ -97,6 +97,11 @@
               bacon
               just
               gh
+              # Interactive `cargo build` honours `.cargo/config.toml`, which sets
+              # `-fuse-ld=mold`; provide mold here so the dev linker resolves. The
+              # hermetic package build strips `.cargo` (see default.nix src filter)
+              # and stays on the default linker, so it needs no mold.
+              mold
             ];
           };
 
