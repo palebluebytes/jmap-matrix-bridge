@@ -6,6 +6,7 @@
 use anyhow::Result;
 use sqlx::{Pool, Sqlite};
 
+pub mod bridge;
 pub mod connection;
 pub mod queue;
 pub mod sync;

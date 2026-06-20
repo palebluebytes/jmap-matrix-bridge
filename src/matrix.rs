@@ -397,12 +397,15 @@ impl MatrixClient {
     }
 
     #[allow(deprecated)]
+    /// Upload `avatar_bytes` and set it as `user_id`'s avatar, returning the
+    /// resulting `mxc://` URI so callers can persist it and avoid re-uploading
+    /// an unchanged image on the next startup.
     pub async fn set_avatar(
         &self,
         user_id: &str,
         avatar_bytes: &[u8],
         mime_type: &str,
-    ) -> Result<()> {
+    ) -> Result<String> {
         info!("Setting avatar for {user_id}");
 
         let user_id = UserId::parse(user_id)?.clone();
@@ -419,7 +422,7 @@ impl MatrixClient {
 
         self.send_as_ghost(avatar_req, &user_id, None).await?;
         info!("Avatar set to {mxc_url}");
-        Ok(())
+        Ok(mxc_url.to_string())
     }
 
     // ── Media ──────────────────────────────────────────────────────────
