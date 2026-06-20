@@ -410,9 +410,16 @@ async fn main() -> anyhow::Result<()> {
             // we last applied. A restart must not re-upload the avatar (each
             // upload mints a fresh `mxc`, orphaning the previous media on the
             // homeserver) or rewrite an unchanged profile. We persist the
-            // applied display name and the avatar's content hash + resulting
-            // `mxc`, mirroring how mautrix bridges track `AvatarHash`/`AvatarMXC`
-            // to keep profile application idempotent.
+            // applied display name and the avatar's content hash, mirroring how
+            // mautrix bridges track `AvatarHash`/`AvatarMXC` to keep profile
+            // application idempotent.
+            //
+            // This is deliberately set-once, not self-healing: we apply each
+            // value exactly once (until the embedded asset or the const here
+            // changes) and never re-assert it. So an operator who clears the bot
+            // avatar by hand keeps it cleared, and a homeserver that loses the
+            // bot profile (DB restore, media reset) stays blank until the asset
+            // changes. Admin intent wins; we don't fight it on every boot.
             let bot_user_id = matrix.bot_user_id();
 
             let display_name_current = store
@@ -449,21 +456,16 @@ async fn main() -> anyhow::Result<()> {
                         acc
                     })
             };
-            // Skip the upload entirely when this exact image is already applied
-            // (recorded hash matches and we have the resulting mxc on file).
-            let avatar_up_to_date = store
-                .get_bridge_state("bot_avatar_hash")
-                .await
-                .ok()
-                .flatten()
+            // The `bot_avatar` row holds "<hash> <mxc>" — a single value written
+            // once after a successful set, so it's atomic by construction: the
+            // recorded hash can never outlive the media it names. The dedup key
+            // is the hash prefix; the mxc is retained only as a debugging
+            // breadcrumb for which media is live.
+            let avatar_state = store.get_bridge_state("bot_avatar").await.ok().flatten();
+            let avatar_up_to_date = avatar_state
                 .as_deref()
-                == Some(logo_hash.as_str())
-                && store
-                    .get_bridge_state("bot_avatar_mxc")
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some();
+                .and_then(|v| v.split_whitespace().next())
+                == Some(logo_hash.as_str());
             if avatar_up_to_date {
                 info!("Bot avatar already up to date (hash {logo_hash}); skipping upload");
             } else {
@@ -472,15 +474,11 @@ async fn main() -> anyhow::Result<()> {
                     .await
                 {
                     Ok(mxc) => {
-                        // Persist the mxc first; only then the hash, so a partial
-                        // write just re-uploads next time rather than recording a
-                        // hash with no media behind it.
-                        if let Err(e) = store.set_bridge_state("bot_avatar_mxc", &mxc).await {
-                            tracing::warn!("Failed to persist bot avatar mxc: {}", e);
-                        } else if let Err(e) =
-                            store.set_bridge_state("bot_avatar_hash", &logo_hash).await
+                        if let Err(e) = store
+                            .set_bridge_state("bot_avatar", &format!("{logo_hash} {mxc}"))
+                            .await
                         {
-                            tracing::warn!("Failed to persist bot avatar hash: {}", e);
+                            tracing::warn!("Failed to persist bot avatar state: {}", e);
                         }
                     }
                     Err(e) => tracing::warn!("Failed to set avatar: {}", e),
