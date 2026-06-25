@@ -40,7 +40,15 @@ pub struct ClientManager {
     /// When true, outbound threaded replies carry a quoted-original of the
     /// parent message (read by the reply `JmapSender` construction sites).
     pub(crate) quote_replies: bool,
+    /// Default send-delay (undo) window in seconds, applied when a user hasn't
+    /// set their own (ADR-0012). Operator-tunable; 5s out of the box.
+    pub(crate) send_delay_default: i64,
 }
+
+/// Upper bound on the send-delay window — a typo can't hold mail for hours.
+pub const MAX_SEND_DELAY_SECS: i64 = 300;
+/// Out-of-the-box default send-delay window.
+pub const DEFAULT_SEND_DELAY_SECS: i64 = 5;
 
 impl std::fmt::Debug for ClientManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -65,7 +73,26 @@ impl ClientManager {
             bridge_mailboxes: false,
             render_mode: RenderMode::default(),
             quote_replies: false,
+            send_delay_default: DEFAULT_SEND_DELAY_SECS,
         }
+    }
+
+    /// Set the operator default send-delay window (seconds), clamped to
+    /// `0..=MAX_SEND_DELAY_SECS`. Per-user `send-delay` overrides this.
+    #[must_use]
+    pub fn with_send_delay_default(mut self, secs: i64) -> Self {
+        self.send_delay_default = secs.clamp(0, MAX_SEND_DELAY_SECS);
+        self
+    }
+
+    /// The effective send-delay window for a user: their override if set, else
+    /// the operator default, clamped to `0..=MAX_SEND_DELAY_SECS`.
+    pub async fn send_delay_for(&self, matrix_user_id: &str) -> i64 {
+        let secs = match self.store.get_send_delay(matrix_user_id).await {
+            Ok(Some(v)) => v,
+            _ => self.send_delay_default,
+        };
+        secs.clamp(0, MAX_SEND_DELAY_SECS)
     }
 
     /// Enable mirroring JMAP mailboxes (Inbox/Sent/…) as their own Matrix rooms.
@@ -470,5 +497,46 @@ mod tests {
             .unwrap();
         let cm = ClientManager::new(store, matrix, 10);
         cm.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn send_delay_for_defaults_and_clamps() {
+        let store = Store::new_in_memory(None).await.unwrap();
+        let matrix = MatrixClient::new("http://localhost", "token", "localhost")
+            .await
+            .unwrap();
+        store
+            .save_user(&RegisteredUser {
+                matrix_user_id: "@a:localhost".to_owned(),
+                jmap_username: "u".to_owned(),
+                jmap_token: "t".to_owned(),
+                jmap_url: "https://j/".to_owned(),
+            })
+            .await
+            .unwrap();
+        let cm = ClientManager::new(store, matrix, 10);
+
+        // No override → operator default.
+        assert_eq!(
+            cm.send_delay_for("@a:localhost").await,
+            DEFAULT_SEND_DELAY_SECS
+        );
+        // A wild per-user override is clamped to the cap.
+        cm.store
+            .set_send_delay("@a:localhost", 99_999)
+            .await
+            .unwrap();
+        assert_eq!(cm.send_delay_for("@a:localhost").await, MAX_SEND_DELAY_SECS);
+    }
+
+    #[tokio::test]
+    async fn with_send_delay_default_clamps() {
+        let store = Store::new_in_memory(None).await.unwrap();
+        let matrix = MatrixClient::new("http://localhost", "token", "localhost")
+            .await
+            .unwrap();
+        let cm = ClientManager::new(store, matrix, 10).with_send_delay_default(99_999);
+        // Unknown user → the (clamped) operator default.
+        assert_eq!(cm.send_delay_for("@x:localhost").await, MAX_SEND_DELAY_SECS);
     }
 }

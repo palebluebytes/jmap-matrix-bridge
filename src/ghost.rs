@@ -10,7 +10,7 @@ use jmap_client::email::Email;
 use matrix_sdk::ruma::events::room::message::{Relation, RoomMessageEventContent};
 use std::fmt::Write as _;
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{info, warn};
 
 /// Subject for an outbound email sent into a room with no thread context.
 /// Prefers the room's own name (set by `!compose` to the user's chosen subject),
@@ -177,124 +177,75 @@ pub async fn handle_ghost_outbound(
     )
     .await;
 
-    // 1. Resolve the ghost email address for this room
-    let ghost_email = state
-        .client_manager
-        .store
-        .get_ghost_email_by_room(rm_id)
-        .await?
-        .context("No ghost email for room")?;
-
-    // 2. Get the sender's JMAP client
+    // Require an active session before queuing — the worker can't submit without
+    // one, and the user should hear about it now rather than silently.
     let Some(client) = state.client_manager.get_client(sender_id).await else {
         notify(state, Some(rm_id), "You are not logged in. Please type `login` in your private bridge room to connect your account.").await;
         return Ok(());
     };
 
-    // 3. Resolve thread context
-    let thread_info =
-        resolve_thread_context(state, rm_id, content.relates_to.as_ref(), &client).await?;
+    // Resolve thread context now (while we have the relation + client) and encode
+    // it for the worker; a fresh email has none. The actual JMAP submission is
+    // deferred to the send-delay worker (ADR-0012), so a redaction inside the
+    // window can still cancel it.
+    let thread_root = resolve_thread_context(state, rm_id, content.relates_to.as_ref(), &client)
+        .await?
+        .map(encode_thread_root);
+    enqueue_held_send(
+        state,
+        sender_id,
+        rm_id,
+        _event_id,
+        &body_str,
+        thread_root.as_deref(),
+        None,
+    )
+    .await
+}
 
-    if let Some((jmap_thread_id, parent_id, root_event_id, latest_event_id, subject)) = thread_info
-    {
-        let sender = JmapSender::new(client).with_quote_replies(state.client_manager.quote_replies);
-        let reply_subject = if subject.starts_with("Re:") {
-            subject
-        } else {
-            format!("Re: {subject}")
-        };
+/// Encode a resolved thread context into the `thread_root_id` the worker parses
+/// (`jmap_thread_id|parent_email_id|root_event_id`).
+fn encode_thread_root(
+    (jmap_thread_id, parent_id, root_event_id, _latest, _subject): (
+        String,
+        String,
+        String,
+        Option<String>,
+        String,
+    ),
+) -> String {
+    let sep = crate::store::THREAD_QUEUE_SEPARATOR;
+    format!("{jmap_thread_id}{sep}{parent_id}{sep}{root_event_id}")
+}
 
-        info!(
-            "Sending ghost room reply to {} (thread {})",
-            ghost_email, jmap_thread_id
-        );
-        if let Err(e) = sender
-            .reply_to_email(
-                &ghost_email,
-                &reply_subject,
-                &body_str,
-                &parent_id,
-                &jmap_thread_id,
-                vec![],
-            )
-            .await
-        {
-            error!(%sender_id, %rm_id, error = %e, "Failed to send reply email, adding to retry queue");
-            let sep = crate::store::THREAD_QUEUE_SEPARATOR;
-            let queue_thread_val = format!("{jmap_thread_id}{sep}{parent_id}{sep}{root_event_id}");
-            state
-                .client_manager
-                .store
-                .add_to_outbound_queue(
-                    sender_id,
-                    rm_id,
-                    _event_id,
-                    &body_str,
-                    None,
-                    Some(&queue_thread_val),
-                    None,
-                )
-                .await?;
-
-            notify(
-                state,
-                Some(rm_id),
-                "⚠️ Network error while sending reply. Message queued for retry.",
-            )
-            .await;
-        }
-        // Update latest event ID tracking regardless of send success
-        // (the outbound queue worker will update this on retry).
-        drop(latest_event_id); // thread context noted; latest_event tracked by ingest path
-        return Ok(());
-    }
-
-    // 4. Default: Send as a fresh email if no thread context found. Use the
-    //    room's name (set by `!compose` to the user's subject) as the email
-    //    subject, falling back to a generic label.
-    let subject = fresh_email_subject(state.client_manager.matrix.room_name(rm_id).await);
-    info!("Sending fresh email to {ghost_email} from ghost room (subject: {subject})");
-
-    let sender = JmapSender::new(client.clone());
-    match sender
-        .send_email(&ghost_email, &subject, &body_str, vec![])
-        .await
-    {
-        Ok(email_id) => {
-            // Record this fresh email's JMAP thread -> room mapping so a later
-            // reply (e.g. "Re: compose test") continues THIS room instead of
-            // spawning a duplicate. The user's own message is the thread root.
-            // Without this, compose-originated threads are unmapped and every
-            // reply lands in a new room.
-            if let Ok(Some(thread_id)) = try_resolve_thread(&client, &email_id).await {
-                if let Err(e) = state
-                    .client_manager
-                    .store
-                    .save_thread_mapping_atomic(&thread_id, _event_id, rm_id, &subject)
-                    .await
-                {
-                    warn!(%rm_id, error = %e, "Failed to map composed thread to room");
-                }
-            } else {
-                warn!(%rm_id, %email_id, "Could not resolve thread for fresh email; a reply may spawn a new room");
-            }
-        }
-        Err(e) => {
-            error!(%sender_id, %rm_id, error = %e, "Failed to send email, adding to retry queue");
-            state
-                .client_manager
-                .store
-                .add_to_outbound_queue(sender_id, rm_id, _event_id, &body_str, None, None, None)
-                .await?;
-            notify(
-                state,
-                Some(rm_id),
-                "⚠️ Network error while sending. Message queued for retry.",
-            )
-            .await;
-        }
-    }
-
+/// Enqueue an outbound message to be submitted after the user's send-delay
+/// window (ADR-0012). The worker (`retry::run_retry_loop`) performs the JMAP
+/// submission once `release_at` passes; a redaction in between cancels it and an
+/// edit rewrites its body.
+async fn enqueue_held_send(
+    state: &AppState,
+    sender_id: &str,
+    rm_id: &str,
+    event_id: &str,
+    body: &str,
+    thread_root: Option<&str>,
+    attachments_json: Option<&str>,
+) -> Result<()> {
+    let delay = state.client_manager.send_delay_for(sender_id).await;
+    state
+        .client_manager
+        .store
+        .add_to_outbound_queue(
+            sender_id,
+            rm_id,
+            event_id,
+            body,
+            None,
+            thread_root,
+            attachments_json,
+            delay,
+        )
+        .await?;
     Ok(())
 }
 
@@ -313,15 +264,8 @@ pub async fn handle_ghost_media_outbound(
 ) -> Result<()> {
     let rm_id = room_id.context("No room ID")?;
 
-    // 1. Resolve the ghost email address for this room
-    let ghost_email = state
-        .client_manager
-        .store
-        .get_ghost_email_by_room(rm_id)
-        .await?
-        .context("No ghost email for room")?;
-
-    // 2. Get the sender's JMAP client
+    // Require an active session before uploading/queuing (the worker resolves the
+    // ghost email from the room mapping at submit time).
     let Some(client) = state.client_manager.get_client(sender_id).await else {
         notify(state, Some(rm_id), "You are not logged in. Please type `login` in your private bridge room to connect your account.").await;
         return Ok(());
@@ -350,89 +294,23 @@ pub async fn handle_ghost_media_outbound(
         }
     };
 
-    // 7. Resolve thread context (shared helper, same logic as text outbound)
-    let thread_info =
-        resolve_thread_context(state, rm_id, content.relates_to.as_ref(), &client).await?;
-
-    if let Some((jmap_thread_id, parent_id, root_event_id, _latest_event_id, subject)) = thread_info
-    {
-        let reply_subject = if subject.starts_with("Re:") {
-            subject
-        } else {
-            format!("Re: {subject}")
-        };
-        info!(
-            "Sending media reply to {} (thread {})",
-            ghost_email, jmap_thread_id
-        );
-        if let Err(e) = sender
-            .reply_to_email(
-                &ghost_email,
-                &reply_subject,
-                "Sent an attachment from Matrix.",
-                &parent_id,
-                &jmap_thread_id,
-                vec![att.clone()],
-            )
-            .await
-        {
-            error!(%sender_id, %rm_id, error = %e, "Failed to send media reply email, adding to retry queue");
-            let sep = crate::store::THREAD_QUEUE_SEPARATOR;
-            let queue_thread_val = format!("{jmap_thread_id}{sep}{parent_id}{sep}{root_event_id}");
-            let atts_json = serde_json::to_string(&vec![att])?;
-            state
-                .client_manager
-                .store
-                .add_to_outbound_queue(
-                    sender_id,
-                    rm_id,
-                    _event_id,
-                    "Sent an attachment from Matrix.",
-                    None,
-                    Some(&queue_thread_val),
-                    Some(&atts_json),
-                )
-                .await?;
-            notify(state, Some(rm_id), "⚠️ Network error while sending media reply. Message and attachment queued for retry.").await;
-        }
-        return Ok(());
-    }
-
-    info!("Sending media as fresh email to {}", ghost_email);
-    let subject = "Matrix Media Attachment".to_owned();
-    if let Err(e) = sender
-        .send_email(
-            &ghost_email,
-            &subject,
-            "Sent an attachment from Matrix.",
-            vec![att.clone()],
-        )
-        .await
-    {
-        error!(%sender_id, %rm_id, error = %e, "Failed to send media email, adding to retry queue");
-        let atts_json = serde_json::to_string(&vec![att])?;
-        state
-            .client_manager
-            .store
-            .add_to_outbound_queue(
-                sender_id,
-                rm_id,
-                _event_id,
-                "Sent an attachment from Matrix.",
-                None,
-                None,
-                Some(&atts_json),
-            )
-            .await?;
-        notify(
-            state,
-            Some(rm_id),
-            "⚠️ Network error while sending media. Message and attachment queued for retry.",
-        )
-        .await;
-    }
-
-    Ok(())
+    // The media is uploaded to the JMAP blob store now (we have the Matrix
+    // content here), but submission is deferred to the send-delay worker like
+    // text (ADR-0012): encode the thread context and queue with the attachment.
+    let thread_root = resolve_thread_context(state, rm_id, content.relates_to.as_ref(), &client)
+        .await?
+        .map(encode_thread_root);
+    let atts_json = serde_json::to_string(&vec![att])?;
+    enqueue_held_send(
+        state,
+        sender_id,
+        rm_id,
+        _event_id,
+        "Sent an attachment from Matrix.",
+        thread_root.as_deref(),
+        Some(&atts_json),
+    )
+    .await
 }
 
 /// Handle the `show-images` text command in a ghost room: load the replied-to
@@ -592,7 +470,10 @@ async fn resolve_thread_context(
     Ok(None)
 }
 
-async fn try_resolve_thread(client: &Arc<Client>, email_id: &str) -> Result<Option<String>> {
+pub(crate) async fn try_resolve_thread(
+    client: &Arc<Client>,
+    email_id: &str,
+) -> Result<Option<String>> {
     let mut request = client.build();
     request.get_email().ids(&[email_id.to_owned()]);
     let response = request
