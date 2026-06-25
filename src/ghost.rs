@@ -160,6 +160,15 @@ pub async fn handle_ghost_outbound(
 ) -> Result<()> {
     let rm_id = room_id.context("No room ID")?;
     let raw_body = content.body();
+
+    // `show-images` is the text twin of the 🖼️ reaction (ADR-0011): when a user
+    // replies to a bridged email with it, load that email's remote images
+    // instead of treating the text as outbound mail. Both paths funnel into the
+    // same `images::handle_load_images_reaction` core, so they can't diverge.
+    if matches!(raw_body.trim(), "show-images" | "!show-images") {
+        return handle_show_images(state, sender_id, rm_id, content).await;
+    }
+
     let mut body_str = raw_body.to_owned();
     let _ = crate::services::content::append_user_signature(
         &state.client_manager.store,
@@ -426,6 +435,45 @@ pub async fn handle_ghost_media_outbound(
     Ok(())
 }
 
+/// Handle the `show-images` text command in a ghost room: load the replied-to
+/// email's remote images via the same core the 🖼️ reaction uses (ADR-0011).
+async fn handle_show_images(
+    state: &AppState,
+    sender_id: &str,
+    rm_id: &str,
+    content: &RoomMessageEventContent,
+) -> Result<()> {
+    // A de-permissioned user can't act, even on a room they once used (ADR-0010).
+    if state.permissions.level_for(sender_id).is_none() {
+        return Ok(());
+    }
+    let Some(target_event_id) = reply_target_event(content.relates_to.as_ref()) else {
+        notify(
+            state,
+            Some(rm_id),
+            "Reply to the email message with `show-images` (or react 🖼️) to load its images.",
+        )
+        .await;
+        return Ok(());
+    };
+    crate::services::images::handle_load_images_reaction(state, sender_id, rm_id, target_event_id)
+        .await
+}
+
+/// The event id a reply/thread relation points at — the message `show-images`
+/// (or a reaction) targets. `None` when the message isn't a reply.
+fn reply_target_event(
+    relates_to: Option<
+        &Relation<matrix_sdk::ruma::events::room::message::RoomMessageEventContentWithoutRelation>,
+    >,
+) -> Option<&str> {
+    match relates_to? {
+        Relation::Reply { in_reply_to } => Some(in_reply_to.event_id.as_str()),
+        Relation::Thread(thread) => Some(thread.event_id.as_str()),
+        _ => None,
+    }
+}
+
 /// Resolve the JMAP thread context for a reply, either from Matrix
 /// relation metadata or from the room's most-recent thread.
 ///
@@ -441,14 +489,8 @@ async fn resolve_thread_context(
     client: &std::sync::Arc<jmap_client::client::Client>,
 ) -> anyhow::Result<Option<(String, String, String, Option<String>, String)>> {
     // 1. Try to resolve from the Matrix reply/thread relation.
-    if let Some(rel) = relates_to {
-        let target_event_id = match rel {
-            Relation::Reply { in_reply_to } => Some(in_reply_to.event_id.as_str()),
-            Relation::Thread(thread) => Some(thread.event_id.as_str()),
-            _ => None,
-        };
-
-        if let Some(event_id) = target_event_id {
+    {
+        if let Some(event_id) = reply_target_event(relates_to) {
             if let Ok(Some(parent_email_id)) = state
                 .client_manager
                 .store
@@ -605,5 +647,31 @@ mod tests {
     fn test_ruma_localpart_extraction() {
         let user = user_id!("@_jmap_user=40example.com:localhost");
         assert_eq!(user.localpart(), "_jmap_user=40example.com");
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn reply_target_event_resolves_only_replies() {
+        use matrix_sdk::ruma::events::relation::InReplyTo;
+        use matrix_sdk::ruma::events::room::message::{
+            MessageType, RoomMessageEventContent, TextMessageEventContent,
+        };
+
+        // A bare message (no relation) has no target — `show-images` here just
+        // shows the usage hint.
+        let plain = RoomMessageEventContent::text_plain("show-images");
+        assert_eq!(reply_target_event(plain.relates_to.as_ref()), None);
+
+        // A reply resolves to the message it answers — the email to load.
+        let mut reply = RoomMessageEventContent::new(MessageType::Text(
+            TextMessageEventContent::plain("show-images"),
+        ));
+        reply.relates_to = Some(Relation::Reply {
+            in_reply_to: InReplyTo::new("$target:localhost".try_into().unwrap()),
+        });
+        assert_eq!(
+            reply_target_event(reply.relates_to.as_ref()),
+            Some("$target:localhost")
+        );
     }
 }
