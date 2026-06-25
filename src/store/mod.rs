@@ -283,6 +283,7 @@ mod tests {
                 None,
                 Some("thread123|parent456|root789"),
                 None,
+                0,
             )
             .await
             .unwrap();
@@ -389,6 +390,7 @@ mod tests {
                 None,
                 None,
                 Some(atts_json),
+                0,
             )
             .await
             .unwrap();

@@ -105,6 +105,21 @@ impl Store {
         self.get_jmap_state(matrix_user_id, "last_sync_at").await
     }
 
+    /// Set the user's send-delay (undo) window in seconds (ADR-0012).
+    pub async fn set_send_delay(&self, matrix_user_id: &str, secs: i64) -> Result<()> {
+        self.save_jmap_state(matrix_user_id, "send_delay_seconds", &secs.to_string())
+            .await
+    }
+
+    /// Read the user's send-delay override in seconds, if they've set one.
+    /// `None` means "use the bridge default".
+    pub async fn get_send_delay(&self, matrix_user_id: &str) -> Result<Option<i64>> {
+        Ok(self
+            .get_jmap_state(matrix_user_id, "send_delay_seconds")
+            .await?
+            .and_then(|s| s.parse::<i64>().ok()))
+    }
+
     fn decrypt_user(&self, user: RegisteredUser) -> Result<RegisteredUser> {
         if let Some(key) = &self.encryption_key {
             let jmap_username =

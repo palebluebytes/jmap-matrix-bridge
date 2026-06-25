@@ -7,6 +7,7 @@ pub mod login;
 pub mod login_matrix;
 pub mod logout;
 pub mod reply;
+pub mod send_delay;
 pub mod signature;
 pub mod status;
 
@@ -63,6 +64,7 @@ impl CommandRouter {
                 Box::new(help::HelpCommand),
                 Box::new(status::StatusCommand),
                 Box::new(logout::LogoutCommand),
+                Box::new(send_delay::SendDelayCommand),
                 Box::new(login_matrix::LoginMatrixCommand),
                 Box::new(login::LoginCommand),
                 Box::new(compose::ComposeCommand),

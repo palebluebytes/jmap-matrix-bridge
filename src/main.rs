@@ -112,6 +112,12 @@ enum Commands {
         #[arg(long, env = "QUOTE_REPLIES", default_value = "true")]
         quote_replies: bool,
 
+        /// Default send-delay (undo) window in seconds before outbound mail is
+        /// submitted (ADR-0012). 5s out of the box; a user can override with the
+        /// `send-delay` command. Clamped to 0..=300; 0 disables the hold.
+        #[arg(long, env = "SEND_DELAY_DEFAULT", default_value = "5")]
+        send_delay_default: i64,
+
         /// Matrix Homeserver URL
         #[arg(long, env = "MATRIX_URL")]
         matrix_url: String,
@@ -294,6 +300,7 @@ async fn main() -> anyhow::Result<()> {
             bridge_mailboxes,
             render_mode,
             quote_replies,
+            send_delay_default,
             matrix_url,
             matrix_as_token,
             matrix_as_token_file,
@@ -396,7 +403,8 @@ async fn main() -> anyhow::Result<()> {
                 client_manager::ClientManager::new(store.clone(), matrix.clone(), jmap_sync_limit)
                     .with_bridge_mailboxes(bridge_mailboxes)
                     .with_render_mode(render_mode)
-                    .with_quote_replies(quote_replies),
+                    .with_quote_replies(quote_replies)
+                    .with_send_delay_default(send_delay_default),
             );
 
             // Register bot user to ensure it exists in Conduit

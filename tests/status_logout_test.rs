@@ -36,7 +36,7 @@ async fn logout_clears_creds_and_queue_but_keeps_rooms_and_puppet() {
         .await
         .unwrap();
     store
-        .add_to_outbound_queue(mxid, "!r:localhost", "$e", "body", None, None, None)
+        .add_to_outbound_queue(mxid, "!r:localhost", "$e", "body", None, None, None, 0)
         .await
         .unwrap();
     store

@@ -123,9 +123,72 @@ pub async fn process_transaction(
                     }
                     continue;
                 }
+                // A redaction of the user's own still-queued message cancels the
+                // send within the send-delay window (ADR-0012); past the window
+                // (already submitted) it's a silent no-op.
+                if let matrix_sdk::ruma::events::AnyMessageLikeEvent::RoomRedaction(redaction) = &e
+                {
+                    if let Some(redacted) = redaction
+                        .as_original()
+                        .and_then(|r| r.redacts.clone().or_else(|| r.content.redacts.clone()))
+                    {
+                        match state
+                            .client_manager
+                            .store
+                            .cancel_outbound_by_event(redacted.as_str())
+                            .await
+                        {
+                            Ok(true) => {
+                                notify(
+                                    state,
+                                    room_id.as_deref(),
+                                    "🗙 Unsent — that message was still within the send-delay window.",
+                                )
+                                .await;
+                            }
+                            Ok(false) => {}
+                            Err(err) => {
+                                error!(error = %err, "Failed to cancel queued send on redaction");
+                            }
+                        }
+                    }
+                    continue;
+                }
                 if let matrix_sdk::ruma::events::AnyMessageLikeEvent::RoomMessage(message_event) = e
                     && let Some(content) = message_event.as_original().map(|ev| &ev.content)
                 {
+                    // An edit (m.replace) of the user's own still-queued message
+                    // rewrites its body within the send-delay window (ADR-0012).
+                    // Intercept it so it is never treated as a fresh outbound
+                    // message (which would send a second email).
+                    if let Some(matrix_sdk::ruma::events::room::message::Relation::Replacement(
+                        repl,
+                    )) = &content.relates_to
+                    {
+                        let target = repl.event_id.to_string();
+                        let new_body = repl.new_content.msgtype.body().to_owned();
+                        match state
+                            .client_manager
+                            .store
+                            .update_outbound_body_by_event(&target, &new_body)
+                            .await
+                        {
+                            Ok(true) => {
+                                notify(
+                                    state,
+                                    room_id.as_deref(),
+                                    "✎ Updated the queued message before it sends.",
+                                )
+                                .await;
+                            }
+                            Ok(false) => {}
+                            Err(err) => {
+                                error!(error = %err, "Failed to apply edit to queued send");
+                            }
+                        }
+                        continue;
+                    }
+
                     let body_str = content.body();
                     tracing::debug!(
                         "Received RoomMessage: event_id={}, sender={}, msgtype={:?}, room={:?}",
