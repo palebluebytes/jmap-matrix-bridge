@@ -165,6 +165,18 @@ enum Commands {
         #[arg(long, env = "ENCRYPTION_KEY_FILE")]
         encryption_key_file: Option<String>,
 
+        /// Shared secret for automatic double-puppet via shared-secret-auth
+        /// (ADR-0014). When set, an interactive `login` by a local user mints a
+        /// double-puppet token automatically (no `login-matrix` paste needed).
+        /// Prefer the `-file` form. Requires the homeserver to run a
+        /// shared-secret-auth module; otherwise users fall back to `login-matrix`.
+        #[arg(long, env = "DOUBLE_PUPPET_SECRET")]
+        double_puppet_secret: Option<String>,
+
+        /// Path to a file holding the double-puppet shared secret.
+        #[arg(long, env = "DOUBLE_PUPPET_SECRET_FILE")]
+        double_puppet_secret_file: Option<String>,
+
         /// Declaratively provision a bridge user at startup. Repeatable.
         ///
         /// Value is a comma-separated list of `key=value` pairs. Keys:
@@ -311,6 +323,8 @@ async fn main() -> anyhow::Result<()> {
             port,
             encryption_key,
             encryption_key_file,
+            double_puppet_secret,
+            double_puppet_secret_file,
             users,
             permissions,
         } => {
@@ -666,11 +680,20 @@ async fn main() -> anyhow::Result<()> {
                 Err(e) => tracing::warn!("Failed to list users to resume puppets: {}", e),
             }
 
+            let double_puppet_secret = resolve_secret(
+                double_puppet_secret,
+                double_puppet_secret_file,
+                "double-puppet-secret",
+            )?
+            .filter(|s| !s.is_empty())
+            .map(std::sync::Arc::new);
+
             let state = jmap_matrix_bridge::routes::AppState {
                 client_manager: client_manager.clone(),
                 state_store,
                 puppet_manager: puppet_manager.clone(),
                 permissions,
+                double_puppet_secret,
                 hs_token: homeserver_token,
             };
 

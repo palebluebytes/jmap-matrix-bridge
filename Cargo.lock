@@ -1841,6 +1841,7 @@ dependencies = [
  "bytes",
  "clap",
  "futures-util",
+ "hmac",
  "html2text",
  "http",
  "jiff",

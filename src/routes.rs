@@ -34,6 +34,9 @@ pub struct AppState {
     pub state_store: Arc<StateStore>,
     pub puppet_manager: Arc<PuppetManager>,
     pub permissions: Arc<crate::permissions::Permissions>,
+    /// Shared secret for automatic double-puppet via shared-secret-auth
+    /// (ADR-0014). `None` disables it — users fall back to manual `login-matrix`.
+    pub double_puppet_secret: Option<Arc<String>>,
     pub hs_token: String,
 }
 

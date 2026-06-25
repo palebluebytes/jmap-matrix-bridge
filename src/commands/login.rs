@@ -2,7 +2,7 @@ use crate::commands::{Command, CommandContext};
 use crate::routes::{AppState, notify};
 use crate::state::LoginState;
 use anyhow::Result;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[derive(Debug)]
 pub struct LoginCommand;
@@ -84,6 +84,7 @@ async fn handle_one_shot_login(
         Ok(()) => {
             info!("Login successful for {sender_id}");
             notify(state, room_id, "Successfully logged in!").await;
+            try_auto_double_puppet(state, sender_id).await;
         }
         Err(e) => {
             error!("Login failed for {sender_id}: {e}");
@@ -91,6 +92,53 @@ async fn handle_one_shot_login(
         }
     }
     Ok(())
+}
+
+/// Best-effort automatic double-puppet for a local interactive user (ADR-0014):
+/// when a shared secret is configured, mint a login token via shared-secret-auth
+/// and start the puppet so the user needn't paste one with `login-matrix`. Any
+/// failure — no secret, a non-local user, or a homeserver without the module —
+/// falls back silently to manual `login-matrix`.
+pub(crate) async fn try_auto_double_puppet(state: &AppState, mxid: &str) {
+    let Some(secret) = state.double_puppet_secret.as_deref() else {
+        return;
+    };
+    let matrix = &state.client_manager.matrix;
+    // Shared-secret-auth is per-homeserver, so this only works for local users.
+    if !mxid.ends_with(&format!(":{}", matrix.domain)) {
+        return;
+    }
+    // Don't clobber a token the user already provided.
+    if matches!(
+        state
+            .client_manager
+            .store
+            .get_matrix_puppet_token(mxid)
+            .await,
+        Ok(Some(_))
+    ) {
+        return;
+    }
+    match crate::puppet::mint_via_shared_secret(&matrix.homeserver_url, mxid, secret).await {
+        Ok(token) => {
+            if state
+                .client_manager
+                .store
+                .set_matrix_puppet_token(mxid, &token)
+                .await
+                .is_ok()
+            {
+                state
+                    .puppet_manager
+                    .ensure_running(mxid.to_owned(), token)
+                    .await;
+                info!("Auto-enabled double-puppet for {mxid} via shared-secret-auth");
+            }
+        }
+        Err(e) => {
+            warn!("Auto double-puppet for {mxid} failed: {e}; user can run `login-matrix`");
+        }
+    }
 }
 
 // ─── Login Flow Steps ─────────────────────────────────────────────────────────
@@ -180,6 +228,7 @@ pub async fn handle_login_waiting_for_url(
         Ok(()) => {
             state.state_store.clear_login_state(sender_id).await;
             notify(state, room_id, "Success! You are now logged in.").await;
+            try_auto_double_puppet(state, sender_id).await;
         }
         Err(e) => {
             // Log the detail server-side, but return a GENERIC message to the
