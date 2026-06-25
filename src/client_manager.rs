@@ -147,6 +147,7 @@ impl ClientManager {
                         tracing::error!("Failed to spawn session for {}: {}. Starting background reconnect task...", user_id, e);
 
                         let manager_reconnect = manager.clone();
+                        let user_id = user_id.clone();
 
                         tokio::spawn(async move {
                             let mut backoff = tokio::time::Duration::from_secs(5);
@@ -166,6 +167,14 @@ impl ClientManager {
                                 }
                             }
                         });
+                    }
+
+                    // Idempotent space repair on boot: re-file any bridged rooms
+                    // that aren't under the user's space (e.g. created while the
+                    // space was unreachable). Best-effort, independent of the
+                    // JMAP session. Mailbox rooms are filed by the mailbox sync.
+                    if let Err(e) = manager.repair_space(&user_id).await {
+                        tracing::warn!("Space repair failed for {}: {}", user_id, e);
                     }
                 }
             })
@@ -255,6 +264,31 @@ impl ClientManager {
         self.store.clear_outbound_queue(matrix_user_id).await?;
         tracing::info!("Logged out {matrix_user_id}; rooms and mappings kept");
         Ok(())
+    }
+
+    /// Force an immediate JMAP reconcile for a user, independent of the
+    /// push-driven loop (backs the `sync` command). Builds a one-off poller and
+    /// runs it once. Errors if the user has no live session.
+    pub async fn poll_now(&self, matrix_user_id: &str) -> Result<()> {
+        let client = self
+            .get_client(matrix_user_id)
+            .await
+            .ok_or_else(|| anyhow!("no active JMAP session"))?;
+        let poller = JmapPoller::new(
+            matrix_user_id.to_owned(),
+            client,
+            self.matrix.clone(),
+            self.store.clone(),
+            self.sync_limit,
+            self.bridge_mailboxes,
+            self.render_mode,
+        );
+        poller.poll().await
+    }
+
+    /// Re-file a user's bridged rooms into their email space (idempotent).
+    pub async fn repair_space(&self, matrix_user_id: &str) -> Result<()> {
+        crate::ghost::repair_email_space(&self.matrix, &self.store, matrix_user_id).await
     }
 
     /// Abort the background event loop for a given user (if any).

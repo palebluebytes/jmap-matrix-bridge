@@ -93,6 +93,17 @@ impl Store {
         .map_err(Into::into)
     }
 
+    /// All of a user's bridged thread-room ids, for the email-space repair.
+    pub async fn get_user_room_ids(&self, matrix_user_id: &str) -> Result<Vec<String>> {
+        sqlx::query_scalar::<Sqlite, String>(
+            "SELECT matrix_room_id FROM room_ghost_mapping WHERE matrix_user_id = ?",
+        )
+        .bind(matrix_user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
     /// Record the time of the most recent successful JMAP sync (RFC 3339), for
     /// the `status` command. Stored in the generic kv table.
     pub async fn set_last_sync(&self, matrix_user_id: &str, ts: &str) -> Result<()> {
