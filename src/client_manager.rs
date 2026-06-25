@@ -216,6 +216,20 @@ impl ClientManager {
         self.clients.read().await.get(matrix_user_id).cloned()
     }
 
+    /// Log a user out: stop their event loop, drop the in-memory client, blank
+    /// their stored credentials, and abandon any queued outbound mail. Rooms,
+    /// ghosts, the space, and mappings are kept so a later `login` resumes in
+    /// place; the double-puppet token is a separate lifecycle and is untouched
+    /// (ADR-0012). Idempotent.
+    pub async fn logout(&self, matrix_user_id: &str) -> Result<()> {
+        self.abort_poller(matrix_user_id).await;
+        self.clients.write().await.remove(matrix_user_id);
+        self.store.clear_user_credentials(matrix_user_id).await?;
+        self.store.clear_outbound_queue(matrix_user_id).await?;
+        tracing::info!("Logged out {matrix_user_id}; rooms and mappings kept");
+        Ok(())
+    }
+
     /// Abort the background event loop for a given user (if any).
     ///
     /// Safe to call even if no loop is running for that user.

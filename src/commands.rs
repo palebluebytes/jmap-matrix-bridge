@@ -5,8 +5,10 @@ pub mod email;
 pub mod help;
 pub mod login;
 pub mod login_matrix;
+pub mod logout;
 pub mod reply;
 pub mod signature;
+pub mod status;
 
 use crate::permissions::Level;
 use crate::routes::{AppState, notify};
@@ -59,6 +61,8 @@ impl CommandRouter {
         Self {
             commands: vec![
                 Box::new(help::HelpCommand),
+                Box::new(status::StatusCommand),
+                Box::new(logout::LogoutCommand),
                 Box::new(login_matrix::LoginMatrixCommand),
                 Box::new(login::LoginCommand),
                 Box::new(compose::ComposeCommand),
