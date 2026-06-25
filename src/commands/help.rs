@@ -17,7 +17,7 @@ impl Command for HelpCommand {
         ctx: &'a CommandContext<'a>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
         Box::pin(async move {
-            let help_text = "Available commands:\n\nlogin - Start interactive login\nhelp - Show this message\nsignature <text> - Set custom signature\nsignature clear - Clear signature\n!compose <address> [subject] - Start a new email conversation (then just type)\n!email <to> <subject> <body> - Send a one-off email";
+            let help_text = "Available commands:\n\nlogin - Start interactive login\nlogout - Disconnect your JMAP account (keeps your rooms)\nstatus - Show bridge connection/sync status (alias: ping)\nhelp - Show this message\nsignature <text> - Set custom signature\nsignature clear - Clear signature\n!compose <address> [subject] - Start a new email conversation (then just type)\n!email <to> <subject> <body> - Send a one-off email";
             notify(state, ctx.room_id, help_text).await;
             Ok(())
         })

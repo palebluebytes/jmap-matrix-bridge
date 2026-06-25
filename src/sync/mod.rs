@@ -69,6 +69,16 @@ impl JmapPoller {
         }
         self.sync_emails().await.context("Email sync failed")?;
 
+        // Record a successful-sync timestamp for the `status` command.
+        // Best-effort: a kv write failure must not fail the poll.
+        if let Err(e) = self
+            .store
+            .set_last_sync(&self.matrix_user_id, &jiff::Timestamp::now().to_string())
+            .await
+        {
+            tracing::warn!(error = %e, "Failed to record last-sync time");
+        }
+
         Ok(())
     }
 }

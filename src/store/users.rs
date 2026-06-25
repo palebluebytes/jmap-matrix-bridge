@@ -38,9 +38,15 @@ impl Store {
         Ok(())
     }
 
+    /// Fetch an *active* (logged-in) user. A logged-out user (blank
+    /// `jmap_token`, see [`Store::clear_user_credentials`]) is reported as
+    /// absent — its row survives only to anchor the kept room/thread mappings.
+    /// The `jmap_token != ''` filter runs before decrypt, so the blanked token
+    /// is never fed to `crypto::decrypt`.
     pub async fn get_user(&self, matrix_user_id: &str) -> Result<Option<RegisteredUser>> {
         sqlx::query_as::<_, RegisteredUser>(
-            "SELECT matrix_user_id, jmap_username, jmap_token, jmap_url FROM users WHERE matrix_user_id = ?"
+            "SELECT matrix_user_id, jmap_username, jmap_token, jmap_url FROM users \
+             WHERE matrix_user_id = ? AND jmap_token != ''",
         )
         .bind(matrix_user_id)
         .fetch_optional(&self.pool)
@@ -49,15 +55,54 @@ impl Store {
         .transpose()
     }
 
+    /// All *active* users — logged-out rows (blank `jmap_token`) are skipped so
+    /// startup never tries to reconnect a session the user explicitly ended.
     pub async fn get_all_users(&self) -> Result<Vec<RegisteredUser>> {
         sqlx::query_as::<_, RegisteredUser>(
-            "SELECT matrix_user_id, jmap_username, jmap_token, jmap_url FROM users",
+            "SELECT matrix_user_id, jmap_username, jmap_token, jmap_url FROM users \
+             WHERE jmap_token != ''",
         )
         .fetch_all(&self.pool)
         .await?
         .into_iter()
         .map(|u| self.decrypt_user(u))
         .collect()
+    }
+
+    /// Log a user out without losing their rooms: blank the stored JMAP
+    /// credentials *in place* (ADR-0012). An in-place `UPDATE` — not a row
+    /// delete — so the `ON DELETE CASCADE` on `room_ghost_mapping` / `jmap_state`
+    /// does not fire, and a later `login` resumes against the same rooms. The
+    /// row then reads as logged-out to [`Store::get_user`] / [`Store::get_all_users`].
+    pub async fn clear_user_credentials(&self, matrix_user_id: &str) -> Result<()> {
+        sqlx::query("UPDATE users SET jmap_token = '' WHERE matrix_user_id = ?")
+            .bind(matrix_user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Count a user's bridged conversation rooms, for the `status` command.
+    pub async fn count_bridged_rooms(&self, matrix_user_id: &str) -> Result<i64> {
+        sqlx::query_scalar::<Sqlite, i64>(
+            "SELECT COUNT(*) FROM room_ghost_mapping WHERE matrix_user_id = ?",
+        )
+        .bind(matrix_user_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Record the time of the most recent successful JMAP sync (RFC 3339), for
+    /// the `status` command. Stored in the generic kv table.
+    pub async fn set_last_sync(&self, matrix_user_id: &str, ts: &str) -> Result<()> {
+        self.save_jmap_state(matrix_user_id, "last_sync_at", ts)
+            .await
+    }
+
+    /// Read the time of the most recent successful JMAP sync, if any.
+    pub async fn get_last_sync(&self, matrix_user_id: &str) -> Result<Option<String>> {
+        self.get_jmap_state(matrix_user_id, "last_sync_at").await
     }
 
     fn decrypt_user(&self, user: RegisteredUser) -> Result<RegisteredUser> {

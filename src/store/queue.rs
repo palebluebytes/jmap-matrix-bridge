@@ -67,4 +67,25 @@ impl Store {
             .await?;
         Ok(())
     }
+
+    /// Drop every pending outbound message for a user. Used by `logout`, which
+    /// abandons unsent mail rather than flushing it (ADR-0012).
+    pub async fn clear_outbound_queue(&self, matrix_user_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM outbound_queue WHERE matrix_user_id = ?")
+            .bind(matrix_user_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Count a user's pending outbound messages, for the `status` command.
+    pub async fn count_outbound_queue(&self, matrix_user_id: &str) -> Result<i64> {
+        sqlx::query_scalar::<sqlx::Sqlite, i64>(
+            "SELECT COUNT(*) FROM outbound_queue WHERE matrix_user_id = ?",
+        )
+        .bind(matrix_user_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
 }
