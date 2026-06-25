@@ -6,6 +6,11 @@ A Matrix Application Service that bridges a JMAP email account to Matrix: each e
 
 ### Identities
 
+**User**:
+The bridged human: one Matrix account paired one-to-one with one JMAP account.
+"One JMAP account per Matrix user" is a fixed boundary ([ADR-0009](docs/adr/0009-one-jmap-account-per-matrix-user.md)) — there is no multi-mailbox login. When the Matrix side and the mailbox side must be distinguished, say "their Matrix account" / "their JMAP account" explicitly.
+_Avoid_: account, login, customer (and bare "user" when you mean the Bot or a Ghost)
+
 **Ghost**:
 A Matrix user in the bridge's exclusive `@_jmap_*` namespace that stands in for an email correspondent, so their messages appear in Matrix as a distinct user. Derived one-per-email-address.
 _Avoid_: puppet, fake user, virtual user, contact user
@@ -16,7 +21,7 @@ _Avoid_: impersonation, ghost (a Ghost is a correspondent, never the user)
 
 **Bot**:
 The single control user the appservice owns (`@_jmap_bot`, the registration's `sender_localpart`). It receives commands, issues invites, and posts bridge notices. Exactly one exists; it is not a Ghost.
-_Avoid_: admin, service user, assistant
+_Avoid_: admin (an **admin** is a User with elevated permissions — [ADR-0010](docs/adr/0010-permission-model.md) — never the Bot), service user, assistant
 
 ### Conversation structure
 
