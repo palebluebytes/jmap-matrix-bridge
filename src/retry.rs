@@ -87,6 +87,15 @@ async fn submit_one(store: &Store, manager: &Arc<ClientManager>, msg: &OutboundM
         Ok(()) => {
             let _ = store.remove_from_outbound_queue(msg.id).await;
             tracing::info!("Submitted outbound message {}", msg.id);
+            crate::services::send_state::mark_final(
+                &manager.matrix,
+                store,
+                &msg.matrix_user_id,
+                &msg.room_id,
+                &msg.event_id,
+                crate::services::send_state::SUBMITTED,
+            )
+            .await;
             true
         }
         Err(e) => {
@@ -195,6 +204,15 @@ async fn handle_unresolved(store: &Store, matrix: &MatrixClient, msg: &OutboundM
             tracing::error!("Failed to send delivery-failure notice: {}", e);
         }
         let _ = store.remove_from_outbound_queue(msg.id).await;
+        crate::services::send_state::mark_final(
+            matrix,
+            store,
+            &msg.matrix_user_id,
+            &msg.room_id,
+            &msg.event_id,
+            crate::services::send_state::FAILED,
+        )
+        .await;
         tracing::warn!(
             "Message {} hit the retry cap. Purged and user notified.",
             msg.id
