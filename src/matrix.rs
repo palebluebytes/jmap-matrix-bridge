@@ -846,6 +846,35 @@ impl MatrixClient {
         Ok(resp.event_id.to_string())
     }
 
+    /// React to `target_event_id` with `key` (an emoji) as the bot, returning the
+    /// reaction event id so it can later be redacted (the send-state indicator,
+    /// #26).
+    pub async fn send_reaction(
+        &self,
+        room_id: &str,
+        target_event_id: &str,
+        key: &str,
+    ) -> Result<String> {
+        let room = RoomId::parse(room_id).context("Invalid Room ID")?;
+        let target = EventId::parse(target_event_id).context("Invalid target event id")?;
+        let bot_id = self.bot_user_id();
+        let sender = UserId::parse(&bot_id)?;
+        let build = || -> Result<SendMessageRequest> {
+            let content = matrix_sdk::ruma::events::reaction::ReactionEventContent::new(
+                matrix_sdk::ruma::events::relation::Annotation::new(target.clone(), key.to_owned()),
+            );
+            Ok(SendMessageRequest::new(
+                room.clone(),
+                Self::txn_id().into(),
+                &matrix_sdk::ruma::events::AnyMessageLikeEventContent::Reaction(content),
+            )?)
+        };
+        let resp = self
+            .send_as_ghost_joining(room.as_str(), &bot_id, &sender, None, build)
+            .await?;
+        Ok(resp.event_id.to_string())
+    }
+
     /// Edit an existing event in place via `m.replace`. The Matrix spec requires
     /// the replacement to be authored by the ORIGINAL event's sender, so
     /// `sender_id` here is the contact ghost that posted the message (not the

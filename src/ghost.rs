@@ -279,7 +279,35 @@ async fn enqueue_held_send(
             delay,
         )
         .await?;
+
+    // Show the held state (#26): a ⏳ reaction while in the send-delay window,
+    // plus a one-time per-room explainer. Only when there's an actual hold.
+    if delay > 0 {
+        let matrix = &state.client_manager.matrix;
+        let store = &state.client_manager.store;
+        crate::services::send_state::mark_held(matrix, store, sender_id, rm_id, event_id).await;
+        maybe_send_hold_hint(state, sender_id, rm_id, delay).await;
+    }
     Ok(())
+}
+
+/// Post a one-time-per-room explainer the first time a held send happens there,
+/// so the ⏳→✅ flow and the undo window are discoverable (#26).
+async fn maybe_send_hold_hint(state: &AppState, sender_id: &str, rm_id: &str, delay: i64) {
+    let key = format!("send_hint:{rm_id}");
+    let store = &state.client_manager.store;
+    if matches!(store.get_jmap_state(sender_id, &key).await, Ok(Some(_))) {
+        return;
+    }
+    notify(
+        state,
+        Some(rm_id),
+        &format!(
+            "Your messages are held {delay}s before sending: ⏳ = waiting (redact to undo, edit to change), ✅ = sent, ❌ = failed. Change the window with `send-delay`."
+        ),
+    )
+    .await;
+    let _ = store.save_jmap_state(sender_id, &key, "1").await;
 }
 
 /// Handle a media message (image, file, etc.) sent by a Matrix user to a ghost room.
