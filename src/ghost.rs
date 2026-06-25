@@ -66,7 +66,7 @@ pub async fn create_contact_room(
 }
 
 /// Ensure the user's email space exists and that `room_id` is a child of it.
-async fn ensure_room_in_email_space(
+pub(crate) async fn ensure_room_in_email_space(
     matrix: &MatrixClient,
     store: &Store,
     matrix_user_id: &str,
@@ -74,6 +74,29 @@ async fn ensure_room_in_email_space(
 ) -> Result<()> {
     let space_id = ensure_email_space(matrix, store, matrix_user_id).await?;
     matrix.add_room_to_space(&space_id, room_id).await
+}
+
+/// Re-file all of a user's bridged thread rooms into their email space
+/// (idempotent). Backs the `sync` command and the startup repair pass, closing
+/// the gap where a room created while the space was unreachable never got linked.
+/// Mailbox rooms are filed separately by the mailbox sync (they aren't user-keyed
+/// in the store).
+pub(crate) async fn repair_email_space(
+    matrix: &MatrixClient,
+    store: &Store,
+    matrix_user_id: &str,
+) -> Result<()> {
+    let rooms = store.get_user_room_ids(matrix_user_id).await?;
+    if rooms.is_empty() {
+        return Ok(());
+    }
+    let space_id = ensure_email_space(matrix, store, matrix_user_id).await?;
+    for room in rooms {
+        if let Err(e) = matrix.add_room_to_space(&space_id, &room).await {
+            warn!(error = %e, %room, "Failed to re-file room into email space");
+        }
+    }
+    Ok(())
 }
 
 /// Return the user's email space room id, creating it on first use. Guarded by a

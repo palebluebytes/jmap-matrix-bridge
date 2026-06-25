@@ -112,12 +112,26 @@ impl JmapPoller {
             let (Some(id), Some(name)) = (mailbox.id(), mailbox.name()) else {
                 continue;
             };
-            if self.store.get_room_id(id).await?.is_some() {
-                continue;
+            let room_id = if let Some(existing) = self.store.get_room_id(id).await? {
+                existing
+            } else {
+                let room_id = self.matrix.create_room_for_mailbox(name).await?;
+                self.store.save_room_mapping(id, &room_id).await?;
+                info!(mailbox.id = id, mailbox.name = name, %room_id, "Mapped mailbox to room");
+                room_id
+            };
+            // File the mailbox room under the user's email space (idempotent), so
+            // mailbox rooms don't float loose in the room list (#24). Best-effort.
+            if let Err(e) = crate::ghost::ensure_room_in_email_space(
+                &self.matrix,
+                &self.store,
+                &self.matrix_user_id,
+                &room_id,
+            )
+            .await
+            {
+                warn!(error = %e, %room_id, "Failed to add mailbox room to email space");
             }
-            let room_id = self.matrix.create_room_for_mailbox(name).await?;
-            self.store.save_room_mapping(id, &room_id).await?;
-            info!(mailbox.id = id, mailbox.name = name, %room_id, "Mapped mailbox to room");
         }
         Ok(())
     }
