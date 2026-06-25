@@ -436,6 +436,33 @@ impl JmapSender {
         request.send().await?;
         Ok(())
     }
+
+    /// Move every email in `thread_id` into the account's mailbox with `role`
+    /// (Trash or Junk), replacing their current mailboxes — the JMAP side of a
+    /// Matrix-driven trash/junk (ADR-0012). Returns `false` when the account has
+    /// no mailbox with that role, so the caller can fall back to a local-only
+    /// unbridge rather than guessing a destination.
+    pub async fn move_thread_to_role(&self, thread_id: &str, role: MailboxRole) -> Result<bool> {
+        let Some(target) = self.mailbox_id_for_role(role).await? else {
+            return Ok(false);
+        };
+        let email_ids = self.thread_email_ids(thread_id).await;
+        if email_ids.is_empty() {
+            return Ok(true);
+        }
+        let mut request = self.client.build();
+        {
+            let params = request.params(Method::SetEmail);
+            let mut args = Arguments::email_set(params);
+            let set = args.email_set_mut();
+            for id in &email_ids {
+                set.update(id).mailbox_ids([target.as_str()]);
+            }
+            request.add_method_call(Method::SetEmail, args);
+        }
+        request.send().await?;
+        Ok(true)
+    }
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────

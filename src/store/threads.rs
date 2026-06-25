@@ -155,6 +155,21 @@ impl Store {
             .map_err(Into::into)
     }
 
+    /// Unbridge a room: drop its ghost binding and any thread mappings so the
+    /// bridge stops treating it as a live conversation (#25 trash/junk teardown).
+    /// New mail in the (still-existing) thread later creates a fresh room.
+    pub async fn unbridge_room(&self, room_id: &str) -> Result<()> {
+        sqlx::query("DELETE FROM room_ghost_mapping WHERE matrix_room_id = ?")
+            .bind(room_id)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("DELETE FROM thread_mapping WHERE matrix_room_id = ?")
+            .bind(room_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     pub async fn get_room_by_ghost(
         &self,
         ghost_email: &str,

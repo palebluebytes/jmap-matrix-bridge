@@ -7,6 +7,7 @@ use crate::store::{Store, ThreadRepository};
 use anyhow::{Context, Result};
 use jmap_client::client::Client;
 use jmap_client::email::Email;
+use jmap_client::mailbox::Role as MailboxRole;
 use matrix_sdk::ruma::events::room::message::{Relation, RoomMessageEventContent};
 use std::fmt::Write as _;
 use std::sync::Arc;
@@ -191,6 +192,15 @@ pub async fn handle_ghost_outbound(
     if matches!(raw_body.trim(), "show-images" | "!show-images") {
         return handle_show_images(state, sender_id, rm_id, content).await;
     }
+    // `delete-room`/`spam` are the text twins of the 🗑/🚫 reactions (ADR-0011):
+    // move the whole thread to Trash/Junk and unbridge the room, rather than
+    // sending the word as mail.
+    if matches!(raw_body.trim(), "delete-room" | "!delete-room") {
+        return handle_thread_action(state, sender_id, rm_id, MailboxRole::Trash, "Trash").await;
+    }
+    if matches!(raw_body.trim(), "spam" | "!spam") {
+        return handle_thread_action(state, sender_id, rm_id, MailboxRole::Junk, "Junk").await;
+    }
 
     let mut body_str = raw_body.to_owned();
     let _ = crate::services::content::append_user_signature(
@@ -359,6 +369,91 @@ async fn handle_show_images(
     };
     crate::services::images::handle_load_images_reaction(state, sender_id, rm_id, target_event_id)
         .await
+}
+
+/// 🗑 wastebasket (U+1F5D1) — the reaction twin of `delete-room` (→ Trash).
+const TRASH_CODEPOINT: char = '\u{1F5D1}';
+/// 🚫 no-entry (U+1F6AB) — the reaction twin of `spam` (→ Junk).
+const JUNK_CODEPOINT: char = '\u{1F6AB}';
+
+/// True if a reaction key is the 🗑 trash gesture (tolerating variation/skin
+/// selectors), i.e. the same action as the `delete-room` command.
+#[must_use]
+pub(crate) fn is_trash_reaction(key: &str) -> bool {
+    key.chars().any(|c| c == TRASH_CODEPOINT)
+}
+
+/// True if a reaction key is the 🚫 junk gesture, i.e. the `spam` command.
+#[must_use]
+pub(crate) fn is_junk_reaction(key: &str) -> bool {
+    key.chars().any(|c| c == JUNK_CODEPOINT)
+}
+
+/// Move a room's whole thread to `role` (Trash or Junk) on the JMAP server, then
+/// unbridge the room (ADR-0012). The unit is the thread — a reaction on any one
+/// message acts on the entire conversation, because one room maps to one thread.
+/// `label` is the human name ("Trash"/"Junk") used in notices.
+///
+/// Reversible by design: this only *moves* mail, never destroys it. If the
+/// account has no mailbox for `role`, the room is unbridged locally and the user
+/// is told the server-side move couldn't happen — never a guess or a destroy. A
+/// transient server error aborts without unbridging, so the user can retry.
+pub(crate) async fn handle_thread_action(
+    state: &AppState,
+    sender_id: &str,
+    rm_id: &str,
+    role: MailboxRole,
+    label: &str,
+) -> Result<()> {
+    if state.permissions.level_for(sender_id).is_none() {
+        return Ok(());
+    }
+    let Some(client) = state.client_manager.get_client(sender_id).await else {
+        notify(state, Some(rm_id), "You are not logged in.").await;
+        return Ok(());
+    };
+    let store = &state.client_manager.store;
+    // Resolve the ghost before unbridging (the lookup is gone afterwards).
+    let ghost_email = store.get_ghost_email_by_room(rm_id).await?;
+
+    let mut had_mailbox = true;
+    if let Some((thread_id, _root, _subject)) = store.get_latest_thread_in_room(rm_id).await? {
+        let sender = JmapSender::new(client);
+        match sender.move_thread_to_role(&thread_id, role).await {
+            Ok(true) => {}
+            Ok(false) => had_mailbox = false,
+            Err(e) => {
+                warn!(error = %e, %rm_id, "Failed to move thread; not unbridging");
+                notify(
+                    state,
+                    Some(rm_id),
+                    &format!("Couldn't move this conversation to {label} (server error) — nothing changed. Try again."),
+                )
+                .await;
+                return Ok(());
+            }
+        }
+    }
+
+    // Unbridge: drop mappings, then have the bot and ghost leave so the room is
+    // defunct. The real user can leave on their own.
+    store.unbridge_room(rm_id).await?;
+    let matrix = &state.client_manager.matrix;
+    let _ = matrix.leave_room(rm_id, &matrix.bot_user_id()).await;
+    if let Some(email) = ghost_email {
+        let ghost_user_id = format!("@{}:{}", email_to_localpart(&email), matrix.domain);
+        let _ = matrix.leave_room(rm_id, &ghost_user_id).await;
+    }
+
+    let msg = if had_mailbox {
+        format!("Moved this conversation to {label} and unbridged the room.")
+    } else {
+        format!(
+            "No {label} mailbox on your account, so I unbridged this room locally but couldn't move the mail server-side."
+        )
+    };
+    notify(state, Some(rm_id), &msg).await;
+    Ok(())
 }
 
 /// The event id a reply/thread relation points at — the message `show-images`
@@ -577,5 +672,15 @@ mod tests {
             reply_target_event(reply.relates_to.as_ref()),
             Some("$target:localhost")
         );
+    }
+
+    #[test]
+    fn trash_and_junk_reaction_glyphs() {
+        assert!(is_trash_reaction("🗑️")); // U+1F5D1 + U+FE0F
+        assert!(is_trash_reaction("🗑")); // bare U+1F5D1
+        assert!(!is_trash_reaction("🚫"));
+        assert!(is_junk_reaction("🚫")); // U+1F6AB
+        assert!(!is_junk_reaction("👍"));
+        assert!(!is_junk_reaction(""));
     }
 }
