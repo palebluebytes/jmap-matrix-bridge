@@ -123,6 +123,38 @@ pub async fn process_transaction(
                     }
                     continue;
                 }
+                // 🗑/🚫 reactions are the gesture twins of `delete-room`/`spam`:
+                // move the whole thread to Trash/Junk and unbridge the room. Run
+                // detached — the JMAP move is network I/O.
+                if let matrix_sdk::ruma::events::AnyMessageLikeEvent::Reaction(reaction) = &e
+                    && let Some(annotation) =
+                        reaction.as_original().map(|ev| &ev.content.relates_to)
+                {
+                    let action = if crate::ghost::is_trash_reaction(&annotation.key) {
+                        Some((jmap_client::mailbox::Role::Trash, "Trash"))
+                    } else if crate::ghost::is_junk_reaction(&annotation.key) {
+                        Some((jmap_client::mailbox::Role::Junk, "Junk"))
+                    } else {
+                        None
+                    };
+                    if let Some((role, label)) = action {
+                        if let Some(rm_id) = room_id.as_deref() {
+                            let state = state.clone();
+                            let sender_id = sender_id.clone();
+                            let rm_id = rm_id.to_owned();
+                            tokio::spawn(async move {
+                                if let Err(err) = crate::ghost::handle_thread_action(
+                                    &state, &sender_id, &rm_id, role, label,
+                                )
+                                .await
+                                {
+                                    error!(%sender_id, %rm_id, error = %err, "Thread {label} action failed");
+                                }
+                            });
+                        }
+                        continue;
+                    }
+                }
                 // A redaction of the user's own still-queued message cancels the
                 // send within the send-delay window (ADR-0012); past the window
                 // (already submitted) it's a silent no-op.

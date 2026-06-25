@@ -19,6 +19,7 @@ use matrix_sdk::ruma::{
         media::create_content::v3::Request as UploadRequest,
         membership::invite_user::v3::{InvitationRecipient, Request as InviteRequest},
         membership::join_room_by_id::v3::Request as JoinRequest,
+        membership::leave_room::v3::Request as LeaveRequest,
         message::send_message_event::v3::Request as SendMessageRequest,
         profile::{
             set_avatar_url::v3::Request as SetAvatarRequest,
@@ -608,6 +609,19 @@ impl MatrixClient {
         let user_id = UserId::parse(user_id)?;
 
         let request = JoinRequest::new(room_id);
+
+        self.send_as_ghost(request, &user_id, None).await?;
+        Ok(())
+    }
+
+    /// Make `user_id` (the bot or a ghost) leave `room_id`. Used to tear a room
+    /// down after its thread is trashed/junked (#25). Best-effort at the call
+    /// site — a ghost that isn't a member just yields a harmless error.
+    pub async fn leave_room(&self, room_id: &str, user_id: &str) -> Result<()> {
+        let room_id = RoomId::parse(room_id)?;
+        let user_id = UserId::parse(user_id)?;
+
+        let request = LeaveRequest::new(room_id);
 
         self.send_as_ghost(request, &user_id, None).await?;
         Ok(())
