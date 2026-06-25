@@ -172,6 +172,15 @@ enum Commands {
         ///   --user "mxid=@you:example.com,username=you,token-file=/run/secrets/jmap"
         #[arg(long = "user", value_name = "SPEC")]
         users: Vec<String>,
+
+        /// Grant bridge access. Repeatable; each value is `key=level` where
+        /// `key` is a full MXID (`@you:example.com`), a homeserver domain
+        /// (`example.com`), or `*`, and `level` is `user` or `admin`. Most
+        /// specific match wins. When omitted, the bridge's own `--matrix-domain`
+        /// is granted `user` and all other (e.g. federated) senders are denied
+        /// (ADR-0010).
+        #[arg(long = "permission", value_name = "KEY=LEVEL")]
+        permissions: Vec<String>,
     },
 }
 
@@ -296,12 +305,23 @@ async fn main() -> anyhow::Result<()> {
             encryption_key,
             encryption_key_file,
             users,
+            permissions,
         } => {
             info!("Starting JMAP Bridge on port {} with db: {}", port, db);
 
             let render_mode: jmap_matrix_bridge::services::content::RenderMode = render_mode
                 .parse()
                 .map_err(|e: String| anyhow::anyhow!(e))?;
+
+            // Default-deny access control (ADR-0010). Empty → local domain gets
+            // `user`, everyone else denied.
+            let permissions = Arc::new(
+                jmap_matrix_bridge::permissions::Permissions::from_specs(
+                    &permissions,
+                    &matrix_domain,
+                )
+                .context("invalid --permission spec")?,
+            );
 
             // Resolve secrets from inline flag or *-file (file preferred, keeps
             // tokens out of argv/env). The Matrix tokens are required.
@@ -642,6 +662,7 @@ async fn main() -> anyhow::Result<()> {
                 client_manager: client_manager.clone(),
                 state_store,
                 puppet_manager: puppet_manager.clone(),
+                permissions,
                 hs_token: homeserver_token,
             };
 

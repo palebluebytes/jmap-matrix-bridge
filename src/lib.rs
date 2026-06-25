@@ -24,6 +24,7 @@ pub mod ghost;
 pub mod ingest;
 pub mod matrix;
 pub mod net;
+pub mod permissions;
 pub mod puppet;
 pub mod retry;
 pub mod routes;

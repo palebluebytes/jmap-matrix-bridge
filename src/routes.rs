@@ -33,6 +33,7 @@ pub struct AppState {
     pub client_manager: Arc<ClientManager>,
     pub state_store: Arc<StateStore>,
     pub puppet_manager: Arc<PuppetManager>,
+    pub permissions: Arc<crate::permissions::Permissions>,
     pub hs_token: String,
 }
 

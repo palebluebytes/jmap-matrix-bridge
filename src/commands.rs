@@ -8,7 +8,8 @@ pub mod login_matrix;
 pub mod reply;
 pub mod signature;
 
-use crate::routes::AppState;
+use crate::permissions::Level;
+use crate::routes::{AppState, notify};
 use anyhow::Result;
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
 
@@ -24,6 +25,13 @@ pub struct CommandContext<'a> {
 pub trait Command: Send + Sync + std::fmt::Debug {
     /// Returns true if the command matches the input.
     fn matches(&self, ctx: &CommandContext<'_>) -> bool;
+
+    /// The minimum permission [`Level`] a sender needs to run this command.
+    /// Defaults to [`Level::User`]; destructive/global commands override to
+    /// [`Level::Admin`] ([ADR-0010](../docs/adr/0010-permission-model.md)).
+    fn min_level(&self) -> Level {
+        Level::User
+    }
 
     /// Executes the command.
     fn execute<'a>(
@@ -61,10 +69,25 @@ impl CommandRouter {
         }
     }
 
-    /// Dispatch context to the first matching command.
-    pub async fn dispatch(&self, state: &AppState, ctx: &CommandContext<'_>) -> Result<()> {
+    /// Dispatch context to the first matching command, enforcing the command's
+    /// minimum permission [`Level`] against the sender's resolved `level`.
+    pub async fn dispatch(
+        &self,
+        state: &AppState,
+        ctx: &CommandContext<'_>,
+        level: Level,
+    ) -> Result<()> {
         for cmd in &self.commands {
             if cmd.matches(ctx) {
+                if level < cmd.min_level() {
+                    notify(
+                        state,
+                        ctx.room_id,
+                        "That command requires admin permission on this bridge.",
+                    )
+                    .await;
+                    return Ok(());
+                }
                 return cmd.execute(state, ctx).await;
             }
         }
@@ -95,7 +118,24 @@ pub async fn handle_login_none(
         message_content,
     };
     let router = CommandRouter::new();
-    router.dispatch(state, &ctx).await
+
+    // Default-deny access control (ADR-0010). A sender matching no permission
+    // entry may not use the bridge at all. We only answer apparent command
+    // attempts so arbitrary chatter from an unpermitted sender isn't spammed
+    // with refusals.
+    let Some(level) = state.permissions.level_for(sender_id) else {
+        if router.matches_any(&ctx) {
+            notify(
+                state,
+                room_id,
+                "You are not permitted to use this bridge. Ask the operator for access.",
+            )
+            .await;
+        }
+        return Ok(());
+    };
+
+    router.dispatch(state, &ctx, level).await
 }
 
 // Re-export login state handlers from sub-module

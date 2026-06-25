@@ -59,6 +59,7 @@ async fn test_multi_user_login_integration() {
             String::new(),
             "@_jmap_bot:localhost".to_string(),
         )),
+        permissions: std::sync::Arc::new(jmap_matrix_bridge::permissions::Permissions::allow_all()),
         hs_token: "hs_token".to_string(),
     };
     let app = Router::new()
