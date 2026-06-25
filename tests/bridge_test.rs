@@ -87,6 +87,7 @@ async fn test_full_bridge_cycle() {
             String::new(),
             "@_jmap_bot:localhost".to_string(),
         )),
+        permissions: std::sync::Arc::new(jmap_matrix_bridge::permissions::Permissions::allow_all()),
         hs_token: "hs_token".to_string(),
     };
 
@@ -145,6 +146,7 @@ async fn test_handle_users_endpoint() {
             String::new(),
             "@_jmap_bot:localhost".to_string(),
         )),
+        permissions: std::sync::Arc::new(jmap_matrix_bridge::permissions::Permissions::allow_all()),
         hs_token: "hs_token".to_string(),
     };
 
@@ -207,6 +209,7 @@ async fn test_handle_transactions_database_error() {
             String::new(),
             "@_jmap_bot:localhost".to_string(),
         )),
+        permissions: std::sync::Arc::new(jmap_matrix_bridge::permissions::Permissions::allow_all()),
         hs_token: "hs_token".to_string(),
     };
 
