@@ -232,6 +232,16 @@ impl Store {
         Ok(())
     }
 
+    /// The Matrix event a bridged JMAP email maps to, if any — used to target a
+    /// read receipt at the right message (#27).
+    pub async fn get_event_id_by_email(&self, email_id: &str) -> Result<Option<String>> {
+        sqlx::query_scalar("SELECT matrix_event_id FROM message_mapping WHERE jmap_email_id = ?")
+            .bind(email_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(Into::into)
+    }
+
     pub async fn get_email_id_from_event_id(&self, event_id: &str) -> Result<Option<String>> {
         sqlx::query_scalar("SELECT jmap_email_id FROM message_mapping WHERE matrix_event_id = ?")
             .bind(event_id)

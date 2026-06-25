@@ -245,6 +245,9 @@ impl JmapPoller {
         let email_id = email.id().context("Email missing id")?;
         if self.store.has_message_mapped(email_id).await? {
             tracing::debug!(%email_id, "Email already mapped, skipping processing.");
+            // Already bridged — but if it's since been read elsewhere, mirror that
+            // read state back to Matrix (#27). Best-effort.
+            self.sync_read_state(email).await;
             return Ok(());
         }
 
@@ -294,6 +297,62 @@ impl JmapPoller {
             );
             self.process_new_thread(email, &ghost, &body).await
         }
+    }
+
+    /// Mirror a "read elsewhere" JMAP state back to Matrix: when an
+    /// already-bridged email carries `$seen`, emit an `m.read` receipt as the
+    /// user's double-puppet, at most once per email (#27).
+    ///
+    /// Requires double-puppet — a receipt must originate from the real user, so
+    /// without a stored puppet token this is a silent no-op (surfaced via
+    /// `status`). The once-per-email gate both honours the unseen→seen intent and
+    /// breaks the Matrix-read → `$seen` → `Email/changes` → receipt cycle.
+    async fn sync_read_state(&self, email: &Email) {
+        let Some(email_id) = email.id() else {
+            return;
+        };
+        if !email.keywords().contains(&"$seen") {
+            return;
+        }
+        let key = format!("read_synced:{email_id}");
+        if matches!(
+            self.store.get_jmap_state(&self.matrix_user_id, &key).await,
+            Ok(Some(_))
+        ) {
+            return;
+        }
+        // Requires double-puppet — without a stored token there's nothing we can
+        // do (the appservice can't set the user's read state).
+        let Ok(Some(token)) = self
+            .store
+            .get_matrix_puppet_token(&self.matrix_user_id)
+            .await
+        else {
+            return;
+        };
+        let Ok(Some(event_id)) = self.store.get_event_id_by_email(email_id).await else {
+            return;
+        };
+        let Some(thread_id) = email.thread_id() else {
+            return;
+        };
+        let Ok(Some((_root, room_id, _latest))) = self.store.get_thread_info(thread_id).await
+        else {
+            return;
+        };
+        if let Err(e) = self
+            .matrix
+            .send_read_receipt(&room_id, &event_id, &token)
+            .await
+        {
+            tracing::warn!(error = %e, %email_id, "Failed to mirror read state to Matrix");
+            return;
+        }
+        let _ = self
+            .store
+            .save_jmap_state(&self.matrix_user_id, &key, "1")
+            .await;
+        tracing::debug!(%email_id, "Mirrored read state to Matrix via puppet receipt");
     }
 
     async fn process_reply(

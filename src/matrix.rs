@@ -1023,4 +1023,35 @@ impl MatrixClient {
         self.send_as_ghost(request, &bot_id, None).await?;
         Ok(())
     }
+
+    /// Send an `m.read` receipt in `room_id` up to `event_id`, authenticated as
+    /// the user themselves via their double-puppet `access_token`. A read receipt
+    /// must come from the real user — the appservice can't set it for them — so
+    /// this is how a "read elsewhere" JMAP state is mirrored back to Matrix (#27).
+    pub async fn send_read_receipt(
+        &self,
+        room_id: &str,
+        event_id: &str,
+        access_token: &str,
+    ) -> Result<()> {
+        let mut url = reqwest::Url::parse(&self.homeserver_url)?;
+        url.path_segments_mut()
+            .map_err(|()| anyhow::anyhow!("homeserver URL cannot be a base"))?
+            .extend(&[
+                "_matrix", "client", "v3", "rooms", room_id, "receipt", "m.read", event_id,
+            ]);
+        let resp = self
+            .http_client
+            .post(url)
+            .bearer_auth(access_token)
+            .json(&serde_json::json!({}))
+            .send()
+            .await?;
+        anyhow::ensure!(
+            resp.status().is_success(),
+            "read receipt failed: {}",
+            resp.status()
+        );
+        Ok(())
+    }
 }
