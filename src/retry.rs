@@ -90,7 +90,14 @@ async fn submit_one(store: &Store, manager: &Arc<ClientManager>, msg: &OutboundM
             true
         }
         Err(e) => {
-            tracing::error!("Failed to submit outbound message {}: {}", msg.id, e);
+            // Keep "adding to retry queue" in the message: it's both accurate
+            // (the message stays queued and is retried) and the signal the VM
+            // round-trip test asserts the rejection is surfaced, not swallowed.
+            tracing::error!(
+                "Failed to submit outbound message {}: {}; adding to retry queue",
+                msg.id,
+                e
+            );
             false
         }
     }
