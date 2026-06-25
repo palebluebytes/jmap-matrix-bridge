@@ -8,6 +8,24 @@ From v0.3.0 onward this file is maintained automatically by
 [release-plz](https://release-plz.dev) from the Conventional Commit history
 (see [ADR-0008](docs/adr/0008-ci-and-release-flow.md)).
 
+## [0.3.0](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.2.1...v0.3.0) - 2026-06-25
+
+### Added
+
+- *(double-puppet)* automatic setup via shared-secret-auth ([#40](https://github.com/palebluebytes/jmap-matrix-bridge/pull/40))
+- *(read-state)* mirror JMAP $seen to Matrix via puppet receipt ([#41](https://github.com/palebluebytes/jmap-matrix-bridge/pull/41))
+- *(send-state)* ⏳→✅/❌ reaction indicator + one-time hint ([#39](https://github.com/palebluebytes/jmap-matrix-bridge/pull/39))
+- *(trash-junk)* delete-room/🗑 → Trash, spam/🚫 → Junk ([#38](https://github.com/palebluebytes/jmap-matrix-bridge/pull/38))
+- *(sync)* add sync command and email-space repair ([#37](https://github.com/palebluebytes/jmap-matrix-bridge/pull/37))
+- *(send-delay)* hold outbound mail with redact/edit undo window ([#36](https://github.com/palebluebytes/jmap-matrix-bridge/pull/36))
+- *(images)* add show-images command, twin of the 🖼️ reaction ([#35](https://github.com/palebluebytes/jmap-matrix-bridge/pull/35))
+- *(commands)* add status (ping) and logout ([#34](https://github.com/palebluebytes/jmap-matrix-bridge/pull/34))
+- *(permissions)* default-deny access map with user/admin levels ([#33](https://github.com/palebluebytes/jmap-matrix-bridge/pull/33))
+
+### Other
+
+- *(adr)* record feature-gap decisions (ADR-0009..0015) ([#31](https://github.com/palebluebytes/jmap-matrix-bridge/pull/31))
+
 ## [0.2.1] - 2026-06-20
 
 ### Fixed
