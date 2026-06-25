@@ -51,6 +51,7 @@ async fn test_help_command() {
             "@_jmap_bot:localhost".to_string(),
         )),
         permissions: std::sync::Arc::new(jmap_matrix_bridge::permissions::Permissions::allow_all()),
+        double_puppet_secret: None,
         hs_token: "hs_token".to_string(),
     };
 
@@ -148,6 +149,7 @@ async fn test_ghost_authored_message_is_ignored() {
             "@_jmap_bot:localhost".to_string(),
         )),
         permissions: std::sync::Arc::new(jmap_matrix_bridge::permissions::Permissions::allow_all()),
+        double_puppet_secret: None,
         hs_token: "hs_token".to_string(),
     };
 
@@ -240,6 +242,7 @@ async fn test_ghost_join_does_not_post_welcome() {
             "@_jmap_bot:localhost".to_string(),
         )),
         permissions: std::sync::Arc::new(jmap_matrix_bridge::permissions::Permissions::allow_all()),
+        double_puppet_secret: None,
         hs_token: "hs_token".to_string(),
     };
 
@@ -319,6 +322,7 @@ async fn test_invite_handling() {
             "@_jmap_bot:localhost".to_string(),
         )),
         permissions: std::sync::Arc::new(jmap_matrix_bridge::permissions::Permissions::allow_all()),
+        double_puppet_secret: None,
         hs_token: "hs_token".to_string(),
     };
 
@@ -415,6 +419,7 @@ async fn test_interactive_login_flow() {
             "@_jmap_bot:localhost".to_string(),
         )),
         permissions: std::sync::Arc::new(jmap_matrix_bridge::permissions::Permissions::allow_all()),
+        double_puppet_secret: None,
         hs_token: "hs_token".to_string(),
     };
 
@@ -625,6 +630,7 @@ async fn test_email_command_not_logged_in() {
             "@_jmap_bot:localhost".to_string(),
         )),
         permissions: std::sync::Arc::new(jmap_matrix_bridge::permissions::Permissions::allow_all()),
+        double_puppet_secret: None,
         hs_token: "hs_token".to_string(),
     };
 
@@ -684,6 +690,7 @@ async fn test_unknown_command() {
             "@_jmap_bot:localhost".to_string(),
         )),
         permissions: std::sync::Arc::new(jmap_matrix_bridge::permissions::Permissions::allow_all()),
+        double_puppet_secret: None,
         hs_token: "hs_token".to_string(),
     };
 
@@ -920,6 +927,7 @@ async fn test_reply_with_attachment_streaming() {
             "@_jmap_bot:localhost".to_string(),
         )),
         permissions: std::sync::Arc::new(jmap_matrix_bridge::permissions::Permissions::allow_all()),
+        double_puppet_secret: None,
         hs_token: "hs_token".to_string(),
     };
 

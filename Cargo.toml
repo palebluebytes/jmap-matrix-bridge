@@ -44,6 +44,9 @@ percent-encoding = "2"
 futures-util = "0.3"
 bytes = "1.8"
 rand = "0.10"
+# Shared-secret-auth double-puppet: HMAC-SHA512 of the mxid is the login password
+# (sha2 is already a dependency below).
+hmac = "0.12"
 
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

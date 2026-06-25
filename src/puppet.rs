@@ -49,6 +49,38 @@ pub async fn login_password(homeserver: &str, mxid: &str, password: &str) -> Res
         .context("login response missing access_token")
 }
 
+/// The shared-secret-auth login password for `mxid`.
+///
+/// The lowercase hex of HMAC-SHA512(secret, mxid) over the *full* Matrix id —
+/// the matrix-synapse-shared-secret-auth / mautrix convention. The homeserver
+/// validates the HMAC and issues a token, so the bridge can mint a double-puppet
+/// token without the user pasting one (ADR-0014).
+#[must_use]
+pub fn shared_secret_password(secret: &str, mxid: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha512;
+    let mut mac =
+        Hmac::<Sha512>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+    mac.update(mxid.as_bytes());
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .fold(String::new(), |mut s, b| {
+            use std::fmt::Write as _;
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+}
+
+/// Mint a double-puppet access token for `mxid` via shared-secret-auth.
+///
+/// A password login whose password is [`shared_secret_password`]. Errors
+/// (including a homeserver without the module) leave the caller to fall back to
+/// manual `login-matrix`.
+pub async fn mint_via_shared_secret(homeserver: &str, mxid: &str, secret: &str) -> Result<String> {
+    login_password(homeserver, mxid, &shared_secret_password(secret, mxid)).await
+}
+
 /// Validate `token` and return the Matrix id it belongs to.
 pub async fn whoami(homeserver: &str, token: &str) -> Result<String> {
     let resp = crate::net::client_with_timeouts()
