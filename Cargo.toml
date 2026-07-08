@@ -63,7 +63,7 @@ html2text = "0.17"
 
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "tls-rustls"] }
 
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 sha2 = "0.10"
 
 clap = { version = "4.6", features = ["derive", "env"] }
