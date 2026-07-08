@@ -26,11 +26,11 @@ pub fn encrypt(plaintext: &str, key: &[u8; 32]) -> Result<String> {
     // Generate a random 12-byte nonce
     let mut nonce_bytes = [0u8; NONCE_LEN];
     rand::rng().fill_bytes(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = Nonce::from(nonce_bytes);
 
     // Encrypt the plaintext (GCM produces ciphertext + 16-byte tag)
     let ciphertext = cipher
-        .encrypt(nonce, plaintext.as_bytes())
+        .encrypt(&nonce, plaintext.as_bytes())
         .map_err(|e| anyhow::anyhow!("Encryption failed: {e}"))?;
 
     // Prepend the nonce to the ciphertext so the result is self-contained
@@ -64,7 +64,7 @@ pub fn decrypt(encoded: &str, key: &[u8; 32]) -> Result<String> {
 
     // Split off the nonce
     let (nonce_bytes, ciphertext) = combined.split_at(NONCE_LEN);
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let nonce = Nonce::try_from(nonce_bytes).context("nonce prefix has the wrong length")?;
 
     // Create the cipher
     let cipher = Aes256Gcm::new_from_slice(key)
@@ -72,7 +72,7 @@ pub fn decrypt(encoded: &str, key: &[u8; 32]) -> Result<String> {
 
     // Decrypt (GCM verifies the tag and returns the plaintext)
     let plaintext = cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map_err(|e| anyhow::anyhow!("Decryption failed: {e}"))?;
 
     // Convert the plaintext bytes back to a string
