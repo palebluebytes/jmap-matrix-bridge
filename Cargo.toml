@@ -46,6 +46,12 @@ bytes = "1.8"
 rand = "0.10"
 # Shared-secret-auth double-puppet: HMAC-SHA512 of the mxid is the login password
 # (sha2 is already a dependency below).
+#
+# Pinned to the 0.10-era digest stack (hmac 0.12 / sha2 0.10): matrix-sdk 0.16
+# requires `sha2 ^0.10.9`, so 0.10 stays in the tree regardless. Bumping our
+# direct use to hmac 0.13 / sha2 0.11 would only ADD a second copy (sha2 0.10 +
+# 0.11, digest 0.10 + 0.11) for no real gain. Revisit when a matrix-sdk upgrade
+# brings sha2 0.11, so the whole tree bumps together. (Dependabot #45/#46 held.)
 hmac = "0.12"
 
 serde = { version = "1.0", features = ["derive"] }
@@ -63,7 +69,7 @@ html2text = "0.17"
 
 sqlx = { version = "0.8", features = ["sqlite", "runtime-tokio", "tls-rustls"] }
 
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 sha2 = "0.10"
 
 clap = { version = "4.6", features = ["derive", "env"] }
