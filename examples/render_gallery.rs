@@ -62,9 +62,18 @@ fn main() {
     );
 
     for e in &emails {
-        let subject = e.get("subject").and_then(serde_json::Value::as_str).unwrap_or("(no subject)");
-        let from = e.get("from").and_then(serde_json::Value::as_str).unwrap_or("");
-        let html = e.get("html").and_then(serde_json::Value::as_str).unwrap_or("");
+        let subject = e
+            .get("subject")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("(no subject)");
+        let from = e
+            .get("from")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+        let html = e
+            .get("html")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
 
         let email: jmap_client::email::Email = serde_json::from_value(serde_json::json!({
             "id": "g", "threadId": "t",
