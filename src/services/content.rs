@@ -712,12 +712,140 @@ fn tag_attr<'a>(tag: &'a str, name: &str) -> Option<(&'a str, std::ops::Range<us
     None
 }
 
+/// True if `html` contains any visible text (not just tags and blank units).
+/// Gates the "leading logo" chrome rule so an *image-only* email keeps its images
+/// instead of having them all dropped as mastheads.
+fn has_visible_text(html: &str) -> bool {
+    let bytes = html.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'<' {
+            i = html[i..].find('>').map_or(bytes.len(), |g| i + g + 1);
+        } else if let Some(n) = blank_unit_len(&html[i..]) {
+            i += n;
+        } else {
+            return true;
+        }
+    }
+    false
+}
+
+/// Mark a completed chain of consecutive single-image links as chrome once it is
+/// at least two long (an icon strip), then reset it. A lone linked image (chain
+/// of one) is left as content — a clickable 🖼️.
+fn flush_link_chain(chain: &mut Vec<usize>, chrome: &mut HashSet<usize>) {
+    if chain.len() >= 2 {
+        chrome.extend(chain.iter().copied());
+    }
+    chain.clear();
+}
+
+/// Byte offsets (the `<` of each `<img`) that are structural *chrome* rather than
+/// content — a masthead/leading logo, a list-item bullet icon, or a social/app
+/// badge strip — so they should neither earn a 🖼️ load-marker nor be fetched on
+/// demand.
+///
+/// [`is_decorative_img`] only sees an image's numeric `width`/`height`; newsletter
+/// chrome is routinely CSS-sized with no dimensions, so it needs these structural
+/// signals instead:
+///   * a leading `<img>` before any visible text — a masthead logo (only when the
+///     email HAS text, so an image-only email keeps its images);
+///   * an `<img>` that is the first visible node inside an `<li>` — a bullet icon;
+///   * an icon *strip*: two or more images in one text-free `<a>`, or a run of two
+///     or more consecutive single-image text-free `<a>`s (separated only by
+///     whitespace/`<br>`). A *lone* linked image is kept as a clickable marker.
+///
+/// Trade-off: a rare *content* image in one of those spots (a hero photo above the
+/// fold, a product thumbnail leading a list item) is dropped too. In Links mode
+/// images are hidden anyway, so the only loss is its load-marker; Rich mode / the
+/// original email still shows it. Removing chrome is the better default.
+fn chrome_image_offsets(html: &str) -> HashSet<usize> {
+    let doc_has_text = has_visible_text(html);
+    let bytes = html.as_bytes();
+    let mut chrome = HashSet::new();
+    let mut seen_text = false; // any visible text emitted so far
+    let mut li_leading = false; // inside an <li>, before its first visible node
+    let mut a_open = false; // currently inside an <a>…</a>
+    let mut a_text = false; // …and it has held visible text
+    let mut a_imgs: Vec<usize> = Vec::new(); // <img> offsets in the current <a>
+    let mut chain: Vec<usize> = Vec::new(); // run of single-image text-free links
+    let mut chain_live = false; // only whitespace/<br> since the last link closed
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'<' {
+            if let Some(n) = blank_unit_len(&html[i..]) {
+                i += n; // whitespace / &nbsp; is transparent
+            } else {
+                flush_link_chain(&mut chain, &mut chrome); // visible text breaks a strip
+                chain_live = false;
+                seen_text = true;
+                li_leading = false;
+                if a_open {
+                    a_text = true;
+                }
+                let ch = html[i..].chars().next().unwrap_or(' ');
+                i += ch.len_utf8();
+            }
+            continue;
+        }
+        let rest = &html[i..];
+        let end = rest.find('>').map_or(bytes.len(), |g| i + g + 1);
+        if starts_tag(rest, "<img") {
+            if (doc_has_text && !seen_text) || li_leading {
+                chrome.insert(i); // masthead logo or list bullet
+            }
+            li_leading = false;
+            if a_open {
+                a_imgs.push(i);
+            } else {
+                flush_link_chain(&mut chain, &mut chrome); // a bare image breaks a strip
+                chain_live = false;
+            }
+        } else if starts_tag(rest, "</a") {
+            if a_open {
+                if !a_text && a_imgs.len() >= 2 {
+                    chrome.extend(a_imgs.iter().copied()); // strip within one link
+                    flush_link_chain(&mut chain, &mut chrome);
+                    chain_live = false;
+                } else if !a_text && a_imgs.len() == 1 {
+                    if !chain_live {
+                        flush_link_chain(&mut chain, &mut chrome);
+                    }
+                    chain.push(a_imgs[0]); // single-image link — extend the strip run
+                    chain_live = true;
+                } else {
+                    flush_link_chain(&mut chain, &mut chrome); // link had text — breaks it
+                    chain_live = false;
+                }
+                a_open = false;
+                a_imgs.clear();
+            }
+        } else if starts_tag(rest, "<a") {
+            a_open = true;
+            a_text = false;
+            a_imgs.clear();
+        } else if !starts_tag(rest, "<br") {
+            // any tag other than <br> breaks a strip run; <li> also arms the bullet rule
+            flush_link_chain(&mut chain, &mut chrome);
+            chain_live = false;
+            if starts_tag(rest, "<li") {
+                li_leading = true;
+            }
+        }
+        i = end;
+    }
+    flush_link_chain(&mut chain, &mut chrome);
+    chrome
+}
+
 /// Collect remote (`http`/`https`) `<img>` sources from an email body, flagging
-/// decorative chrome (trackers/spacers and tiny icons — see [`is_decorative_img`]).
-/// De-duplicated by `src`, preserving first-seen order.
+/// decorative chrome (trackers/spacers, tiny icons, and structural chrome — see
+/// [`is_decorative_img`] and [`chrome_image_offsets`]). De-duplicated by `src`,
+/// preserving first-seen order.
 #[must_use]
 pub(crate) fn extract_remote_images(html: &str) -> Vec<RemoteImg> {
     let bytes = html.as_bytes();
+    let chrome = chrome_image_offsets(html);
     let mut out: Vec<RemoteImg> = Vec::new();
     let mut i = 0;
     while let Some(start) = find_ci(&bytes[i..], b"<img", 0).map(|r| i + r) {
@@ -732,7 +860,7 @@ pub(crate) fn extract_remote_images(html: &str) -> Vec<RemoteImg> {
             {
                 out.push(RemoteImg {
                     url: src.to_owned(),
-                    is_decorative: is_decorative_img(tag),
+                    is_decorative: is_decorative_img(tag) || chrome.contains(&start),
                 });
             }
         }
@@ -741,14 +869,18 @@ pub(crate) fn extract_remote_images(html: &str) -> Vec<RemoteImg> {
     out
 }
 
-/// Replace each remote (`http`/`https`), non-tracker `<img>` with a 🖼️ marker,
-/// and drop other images. Run only in links mode so the reader sees where the
-/// loadable images sit (the marker set matches [`extract_remote_images`], so the
-/// 🖼️ markers correspond 1:1 with what a 🖼️ reaction will load). A wrapping
-/// `<a>` is kept, so a linked image becomes a clickable 🖼️.
+/// Replace each remote (`http`/`https`), non-tracker, non-chrome `<img>` with a
+/// 🖼️ marker, and drop other images. Run only in links mode so the reader sees
+/// where the loadable images sit (the marker set matches [`extract_remote_images`],
+/// so the 🖼️ markers correspond 1:1 with what a 🖼️ reaction will load — both drop
+/// decorative trackers and structural chrome, see [`chrome_image_offsets`]).
+/// Structural chrome — logos, list-item bullet icons, and social/app badges — is
+/// dropped outright rather than marked, so an image-heavy newsletter footer no
+/// longer renders as a wall of 🖼️.
 #[must_use]
 fn placeholder_remote_images(html: &str) -> String {
     let bytes = html.as_bytes();
+    let chrome = chrome_image_offsets(html);
     let mut out = String::with_capacity(html.len());
     let mut i = 0;
     while let Some(start) = find_ci(&bytes[i..], b"<img", 0).map(|r| i + r) {
@@ -760,7 +892,7 @@ fn placeholder_remote_images(html: &str) -> String {
         let src = tag_attr(tag, "src").map_or("", |(v, _)| v);
         let lower = src.trim().to_ascii_lowercase();
         let remote = lower.starts_with("http://") || lower.starts_with("https://");
-        if remote && !is_decorative_img(tag) {
+        if remote && !is_decorative_img(tag) && !chrome.contains(&start) {
             out.push_str("🖼️");
         }
         i = end;
@@ -1481,6 +1613,96 @@ mod tests {
         assert!(!imgs[0].is_decorative, "600px-wide hero is content");
         assert!(imgs[1].is_decorative, "1x1 tracker is decorative");
         assert!(imgs[2].is_decorative, "24x24 icon is decorative");
+    }
+
+    #[test]
+    fn structural_chrome_images_are_dropped_not_marked() {
+        use super::{RenderMode, sanitize_for_matrix};
+        // A newsletter shaped like the real InPost mail: masthead logos, list
+        // bullet icons, an app-badge column and a social-icon row — all CSS-sized
+        // (no width/height), so is_decorative_img alone would keep them. None is a
+        // content image, so none should render as a 🖼️.
+        let html = "\
+            <img src=\"https://x/logo.png\"><img src=\"https://x/banner.png\">\
+            <p>Hola, tu paquete te espera.</p>\
+            <ul>\
+              <li><img src=\"https://x/check.png\"> Presenta este mensaje.</li>\
+              <li><img src=\"https://x/check.png\"> Lleva tu documento.</li>\
+            </ul>\
+            <a href=\"https://x/ios\"><img src=\"https://x/ios.png\"><br><img src=\"https://x/and.png\"></a>\
+            <a href=\"https://x/fb\"><img src=\"https://x/fb.png\"></a> \
+            <a href=\"https://x/ig\"><img src=\"https://x/ig.png\"></a>\
+            <p>Gracias.</p>";
+        let out = sanitize_for_matrix(html, RenderMode::Links);
+        assert_eq!(
+            out.matches('🖼').count(),
+            0,
+            "every image is chrome and must be dropped, not marked: {out}"
+        );
+        assert!(
+            out.contains("paquete") && out.contains("Presenta") && out.contains("Gracias"),
+            "surrounding text must survive: {out}"
+        );
+    }
+
+    #[test]
+    fn lone_linked_banner_and_standalone_photo_stay_marked() {
+        use super::{RenderMode, sanitize_for_matrix};
+        // A single linked hero (not a strip) and a standalone content image after
+        // text are NOT chrome — each keeps its clickable 🖼️ load-marker.
+        let html = "<p>Check out our sale:</p>\
+            <a href=\"https://x/sale\"><img src=\"https://x/hero.png\" width=\"600\"></a>\
+            <p>And this photo:</p><img src=\"https://x/photo.png\" width=\"500\">";
+        let out = sanitize_for_matrix(html, RenderMode::Links);
+        assert_eq!(
+            out.matches('🖼').count(),
+            2,
+            "lone linked banner + standalone photo keep their markers: {out}"
+        );
+    }
+
+    #[test]
+    fn image_only_email_keeps_its_images() {
+        use super::{RenderMode, sanitize_for_matrix};
+        // No visible text anywhere: the leading-logo rule must NOT fire, or an
+        // image-only email would be stripped to nothing.
+        let html = "<img src=\"https://x/a.png\" width=\"500\">\
+            <img src=\"https://x/b.png\" width=\"500\">";
+        let out = sanitize_for_matrix(html, RenderMode::Links);
+        assert_eq!(
+            out.matches('🖼').count(),
+            2,
+            "image-only email keeps its images: {out}"
+        );
+    }
+
+    #[test]
+    fn extract_flags_chrome_strip_as_decorative_so_it_is_not_loaded() {
+        use super::extract_remote_images;
+        // The marker set and the load set must agree: a social-icon strip is
+        // chrome, so a 🖼️ reaction must not fetch it; the standalone photo loads.
+        let html = "<p>hi</p>\
+            <a href=\"https://x/fb\"><img src=\"https://x/fb.png\"></a> \
+            <a href=\"https://x/ig\"><img src=\"https://x/ig.png\"></a>\
+            <p>see this:</p><img src=\"https://x/photo.png\" width=\"600\">";
+        let imgs = extract_remote_images(html);
+        let decorative = |u: &str| {
+            imgs.iter()
+                .find(|r| r.url == u)
+                .is_some_and(|r| r.is_decorative)
+        };
+        assert!(
+            decorative("https://x/fb.png"),
+            "fb icon is a strip → decorative"
+        );
+        assert!(
+            decorative("https://x/ig.png"),
+            "ig icon is a strip → decorative"
+        );
+        assert!(
+            !decorative("https://x/photo.png"),
+            "standalone photo is content → loadable"
+        );
     }
 
     #[test]
