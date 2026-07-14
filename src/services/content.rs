@@ -235,6 +235,48 @@ fn find_ci(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
         .find(|&i| haystack[i..i + needle.len()].eq_ignore_ascii_case(needle))
 }
 
+/// Insert lightweight separators at table boundaries *before* the sanitizer
+/// unwraps them. Matrix's allowed-HTML has no table tags, so ammonia drops
+/// `<table>`/`<tr>`/`<td>` and keeps only their text — which glues adjacent cells
+/// together (a `[logo][Feefo][on behalf of]` layout row becomes "Feefoon behalf
+/// of") and runs a row straight into the next block. Emitting a space after each
+/// cell and a `<br>` after each row/table (and its section wrappers) restores the
+/// visual breaks; the later `collapse_breaks`/`collapse_blank_runs` passes fold
+/// any excess a nested layout table produces.
+#[must_use]
+fn separate_table_blocks(html: &str) -> String {
+    let bytes = html.as_bytes();
+    let mut out = String::with_capacity(html.len() + html.len() / 16);
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'<' {
+            let ch = html[i..].chars().next().unwrap_or(' ');
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        let rest = &html[i..];
+        let end = rest.find('>').map_or(bytes.len(), |g| i + g + 1);
+        out.push_str(&html[i..end]);
+        // A space keeps cell text apart; a <br> breaks rows and whole tables.
+        // `</td`/`</th` are matched before the section wrappers so `</thead`
+        // (a break) is not mistaken for `</th` (a space).
+        if starts_tag(rest, "</td") || starts_tag(rest, "</th") {
+            out.push(' ');
+        } else if starts_tag(rest, "</tr")
+            || starts_tag(rest, "</table")
+            || starts_tag(rest, "</tbody")
+            || starts_tag(rest, "</thead")
+            || starts_tag(rest, "</tfoot")
+            || starts_tag(rest, "</caption")
+        {
+            out.push_str("<br>");
+        }
+        i = end;
+    }
+    out
+}
+
 /// Sanitize an HTML email body into a Matrix `formatted_body` that is provably
 /// conformant to the Matrix spec's allowed-HTML subset (spec.matrix.org), using
 /// `ammonia` as an allowlist sanitizer. Anything outside the allowlist is either
@@ -257,6 +299,9 @@ fn sanitize_for_matrix(html: &str, mode: RenderMode) -> String {
     } else {
         pre
     };
+    // Restore cell/row breaks before ammonia unwraps the (disallowed) table tags,
+    // so a layout-table row doesn't collapse into one glued line.
+    let pre = separate_table_blocks(&pre);
     let builder = match mode {
         RenderMode::Links => &*LINKS_SANITIZER,
         // Plain never reaches here (from_email emits no formatted body for it).
@@ -596,8 +641,9 @@ fn strip_reply_blockquotes(html: &str) -> String {
 }
 
 /// Collapse runs of `<br>` (ammonia normalizes `<br/>`/`<br />` to `<br>`) to at
-/// most two, ignoring whitespace between them, and drop a trailing run — so the
-/// empty paragraphs mail composers leave don't render as a ladder of blank lines.
+/// most two, ignoring whitespace between them, and drop a leading/trailing run —
+/// so the empty paragraphs mail composers leave (and the break a leading layout
+/// table now emits) don't render as a ladder of blank lines.
 #[must_use]
 fn collapse_breaks(s: &str) -> String {
     const BR: &str = "<br>";
@@ -627,7 +673,11 @@ fn collapse_breaks(s: &str) -> String {
     while out.ends_with(BR) {
         out.truncate(out.len() - BR.len());
     }
-    out.trim().to_owned()
+    let mut out = out.trim();
+    while out.starts_with(BR) {
+        out = out[BR.len()..].trim_start();
+    }
+    out.to_owned()
 }
 
 /// A remote `<img>` referenced by an email body.
@@ -1471,6 +1521,34 @@ mod tests {
         assert!(
             !clean.contains("<table") && !clean.contains("<td") && !clean.contains("<tr"),
             "table tags must be unwrapped (linearized): {clean}"
+        );
+    }
+
+    #[test]
+    fn table_cells_and_rows_get_separators_not_glued() {
+        use super::{RenderMode, sanitize_for_matrix};
+        // A layout-table row (the real Feefo/WildBounds shape) must not collapse
+        // into one glued line when the disallowed table tags are unwrapped.
+        let dirty = "<table><tbody>\
+            <tr><td>Feefo</td><td>on behalf of</td><td>WildBounds.</td></tr>\
+            <tr><td>Would you recommend?</td></tr>\
+            </tbody></table><h1>Hi Thomas</h1>";
+        let clean = sanitize_for_matrix(dirty, RenderMode::Rich);
+        assert!(
+            clean.contains("Feefo on behalf of WildBounds."),
+            "cells must be space-separated, not glued: {clean}"
+        );
+        assert!(
+            !clean.contains("Feefoon") && !clean.contains("WildBounds.Would"),
+            "cells/rows must not glue: {clean}"
+        );
+        assert!(
+            !clean.contains("recommend?Hi"),
+            "the table must break before the next block: {clean}"
+        );
+        assert!(
+            !clean.contains("<table") && !clean.contains("<td") && !clean.contains("<tr"),
+            "table tags must still be unwrapped: {clean}"
         );
     }
 
