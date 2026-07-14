@@ -235,16 +235,37 @@ fn find_ci(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
         .find(|&i| haystack[i..i + needle.len()].eq_ignore_ascii_case(needle))
 }
 
-/// Insert lightweight separators at table boundaries *before* the sanitizer
-/// unwraps them. Matrix's allowed-HTML has no table tags, so ammonia drops
-/// `<table>`/`<tr>`/`<td>` and keeps only their text — which glues adjacent cells
-/// together (a `[logo][Feefo][on behalf of]` layout row becomes "Feefoon behalf
-/// of") and runs a row straight into the next block. Emitting a space after each
-/// cell and a `<br>` after each row/table (and its section wrappers) restores the
-/// visual breaks; the later `collapse_breaks`/`collapse_blank_runs` passes fold
-/// any excess a nested layout table produces.
+/// Replace table tags with lightweight separators *before* the sanitizer runs.
+/// Matrix's allowed-HTML has no table tags, so ammonia drops `<table>`/`<tr>`/`<td>`
+/// keeping only their text — which glues adjacent cells (a `[logo][Feefo][on
+/// behalf of]` layout row becomes "Feefoon behalf of") and runs a row straight
+/// into the next block. We can't just *insert* a `<br>` between `</tr>` and `<tr>`:
+/// the HTML5 parser foster-parents a `<br>` that isn't valid table content out of
+/// the table, so it's lost. Instead we strip the table tags ourselves here —
+/// dropping the open tags and turning each cell close into a space and each
+/// row/table/section close into a `<br>` — so ammonia never sees a table and the
+/// separators survive as ordinary inline content. `collapse_breaks` /
+/// `collapse_blank_runs` fold any excess a deeply nested layout produces.
 #[must_use]
-fn separate_table_blocks(html: &str) -> String {
+fn separate_table_blocks(html: &str, mode: RenderMode) -> String {
+    // Open tags dropped outright (case-insensitive, boundary-checked).
+    const OPEN: &[&str] = &[
+        "<table",
+        "<tbody",
+        "<thead",
+        "<tfoot",
+        "<tr",
+        "<td",
+        "<th",
+        "<caption",
+        "<col",
+        "<colgroup",
+    ];
+    // Links mode unwraps <div> too (a block container), so its boundaries also
+    // vanish — running one section into the next. Break on it here for the same
+    // reason as a table row. Rich keeps <div> (it renders its own break), so leave
+    // it alone there.
+    let break_divs = matches!(mode, RenderMode::Links);
     let bytes = html.as_bytes();
     let mut out = String::with_capacity(html.len() + html.len() / 16);
     let mut i = 0;
@@ -257,21 +278,25 @@ fn separate_table_blocks(html: &str) -> String {
         }
         let rest = &html[i..];
         let end = rest.find('>').map_or(bytes.len(), |g| i + g + 1);
-        out.push_str(&html[i..end]);
-        // A space keeps cell text apart; a <br> breaks rows and whole tables.
         // `</td`/`</th` are matched before the section wrappers so `</thead`
         // (a break) is not mistaken for `</th` (a space).
         if starts_tag(rest, "</td") || starts_tag(rest, "</th") {
-            out.push(' ');
+            out.push(' '); // keep cell text apart
         } else if starts_tag(rest, "</tr")
             || starts_tag(rest, "</table")
             || starts_tag(rest, "</tbody")
             || starts_tag(rest, "</thead")
             || starts_tag(rest, "</tfoot")
             || starts_tag(rest, "</caption")
+            || (break_divs && starts_tag(rest, "</div"))
         {
-            out.push_str("<br>");
+            out.push_str("<br>"); // break rows / whole tables / (links) div sections
+        } else if break_divs && starts_tag(rest, "<div") {
+            // drop the div open (links unwraps it anyway); its </div> broke above
+        } else if !OPEN.iter().any(|t| starts_tag(rest, t)) {
+            out.push_str(&html[i..end]); // not a table/handled tag — keep verbatim
         }
+        // (table open tags fall through: dropped, nothing emitted)
         i = end;
     }
     out
@@ -301,7 +326,7 @@ fn sanitize_for_matrix(html: &str, mode: RenderMode) -> String {
     };
     // Restore cell/row breaks before ammonia unwraps the (disallowed) table tags,
     // so a layout-table row doesn't collapse into one glued line.
-    let pre = separate_table_blocks(&pre);
+    let pre = separate_table_blocks(&pre, mode);
     let builder = match mode {
         RenderMode::Links => &*LINKS_SANITIZER,
         // Plain never reaches here (from_email emits no formatted body for it).
@@ -1550,6 +1575,52 @@ mod tests {
             !clean.contains("<table") && !clean.contains("<td") && !clean.contains("<tr"),
             "table tags must still be unwrapped: {clean}"
         );
+    }
+
+    #[test]
+    fn per_row_blocks_are_broken_by_a_br_not_foster_parented_away() {
+        use super::{RenderMode, sanitize_for_matrix};
+        // The real Samsonite/shipcloud shape: each language sits in its own
+        // <tr><td><div>…</div></td></tr>. A <br> inserted between </tr> and <tr>
+        // would be foster-parented out of the table by the HTML5 parser and lost,
+        // gluing the languages; stripping the table tags ourselves keeps the break.
+        let dirty = "<table><tbody>\
+            <tr><td style=\"p\"><div>English here.</div></td></tr>\
+            <tr><td style=\"p\"><div>German Wir haben.</div></td></tr>\
+            <tr><td style=\"p\"><div>French Nous avons.</div></td></tr>\
+            </tbody></table>";
+        for mode in [RenderMode::Links, RenderMode::Rich] {
+            let clean = sanitize_for_matrix(dirty, mode);
+            // Reduce to visible lines: <br> -> newline, then drop the other tags.
+            let mut plain = String::new();
+            let mut in_tag = false;
+            for c in clean.replace("<br>", "\n").chars() {
+                match c {
+                    '<' => in_tag = true,
+                    '>' => in_tag = false,
+                    _ if !in_tag => plain.push(c),
+                    _ => {}
+                }
+            }
+            let lines: Vec<&str> = plain
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect();
+            // No single line may carry two languages — that would be the glue bug.
+            assert!(
+                !lines
+                    .iter()
+                    .any(|l| l.contains("English") && l.contains("German")),
+                "languages glued onto one line ({mode:?}): {lines:?}"
+            );
+            for lang in ["English here.", "German Wir haben.", "French Nous avons."] {
+                assert!(
+                    lines.iter().any(|l| l.contains(lang)),
+                    "missing {lang:?} on its own line ({mode:?}): {lines:?}"
+                );
+            }
+        }
     }
 
     #[test]
