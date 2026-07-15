@@ -323,27 +323,38 @@ const BLOCK_TAGS: &[&str] = &[
     "summary",
 ];
 
-/// True if the text already emitted ends with a block-level open or close tag.
-fn ends_with_block(out: &str) -> bool {
+/// Heading tags, treated specially: a `<br>` next to a heading is *kept* (a header
+/// wants breathing room), even though the heading is also a block. Senders often
+/// zero a heading's own margin and space it with table/div padding, which becomes
+/// that `<br>` once linearized.
+const HEADING_TAGS: &[&str] = &["h1", "h2", "h3", "h4", "h5", "h6"];
+
+/// Name (lowercased, `/` stripped) of the last complete tag `out` ends with.
+fn last_tag_name(out: &str) -> Option<String> {
     let t = out.trim_end();
-    let Some(open) = t.strip_suffix('>').and_then(|_| t.rfind('<')) else {
-        return false;
-    };
-    let name = t[open + 1..t.len() - 1]
-        .trim_start_matches('/')
-        .split(|c: char| c.is_whitespace() || c == '/' || c == '>')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    BLOCK_TAGS.contains(&name.as_str())
+    let open = t.strip_suffix('>').and_then(|_| t.rfind('<'))?;
+    Some(
+        t[open + 1..t.len() - 1]
+            .trim_start_matches('/')
+            .split(|c: char| c.is_whitespace() || c == '/' || c == '>')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase(),
+    )
 }
 
-/// True if `rest` begins (after leading whitespace) with a block open/close tag.
-fn starts_with_block(rest: &str) -> bool {
+/// Name (lowercased, `/` stripped) of the tag `rest` begins with, after whitespace.
+fn first_tag_name(rest: &str) -> Option<String> {
     let r = rest.trim_start();
-    BLOCK_TAGS
-        .iter()
-        .any(|b| starts_tag(r, &format!("<{b}")) || starts_tag(r, &format!("</{b}")))
+    let close = r.strip_prefix('<').and_then(|s| s.find('>'))?;
+    Some(
+        r[1..=close]
+            .trim_start_matches('/')
+            .split(|c: char| c.is_whitespace() || c == '/' || c == '>')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase(),
+    )
 }
 
 /// End index of a run of one-or-more `<br>` starting at `i` (whitespace allowed
@@ -369,17 +380,26 @@ fn br_run_end(s: &str, i: usize) -> Option<usize> {
 
 /// Drop `<br>` runs sitting right after a block close/open or right before a
 /// block open/close — the block already breaks the line, so the `<br>` only adds
-/// an empty line. A newsletter that wraps paragraphs in `<p>`/`<h1>` AND pads them
-/// with `<br>` otherwise renders as tall double gaps. Bare-text breaks (no
-/// adjacent block) are kept, so genuine line breaks survive.
+/// an empty line (a newsletter that wraps paragraphs in `<p>` AND pads them with
+/// `<br>` otherwise renders as tall double gaps). Two exceptions keep genuine
+/// separation: a `<br>` adjacent to a **heading** is kept (headers want breathing
+/// room, and their own margin is often zeroed by the sender), and a bare-text
+/// break (no adjacent block) is kept.
 #[must_use]
 fn strip_block_adjacent_breaks(s: &str) -> String {
+    let is =
+        |name: &Option<String>, set: &[&str]| name.as_deref().is_some_and(|n| set.contains(&n));
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
     while i < s.len() {
         if let Some(run_end) = br_run_end(s, i) {
-            // Redundant beside a block — drop; otherwise it's a bare-text break — keep.
-            if !(ends_with_block(&out) || starts_with_block(&s[run_end..])) {
+            let before = last_tag_name(&out);
+            let after = first_tag_name(&s[run_end..]);
+            let touches_heading = is(&before, HEADING_TAGS) || is(&after, HEADING_TAGS);
+            let touches_block = is(&before, BLOCK_TAGS) || is(&after, BLOCK_TAGS);
+            // Keep the break beside a heading or between bare text; drop it where a
+            // non-heading block already supplies the spacing.
+            if touches_heading || !touches_block {
                 out.push_str(&s[i..run_end]);
             }
             i = run_end;
@@ -1797,19 +1817,23 @@ mod tests {
     }
 
     #[test]
-    fn br_adjacent_to_block_elements_is_dropped() {
+    fn br_between_paragraphs_dropped_but_kept_around_headings() {
         use super::{RenderMode, sanitize_for_matrix};
-        // The real N26 shape: paragraphs wrapped in <p>/<h1> AND padded with <br>,
-        // which renders as tall double gaps. The block already breaks the line, so
-        // the adjacent <br> is dropped; a break between bare-text lines is kept.
-        let html = "<p>First para.</p><br><br><h1>A Heading</h1><br><p>Second para.</p>\
-            Bare line one.<br><br>Bare line two.";
+        // The N26 shape: paragraphs padded with <br> render as tall double gaps —
+        // the <p> margins already space them, so the <br> is dropped. But a heading
+        // (whose own margin the sender often zeros) keeps its <br> for breathing
+        // room, and a bare-text break survives.
+        let html = "<p>First para.</p><br><br><p>Second para.</p>\
+            <br><br><h1>A Heading</h1><br>After heading.\
+            <br><br>Bare line one.<br><br>Bare line two.";
         let clean = sanitize_for_matrix(html, RenderMode::Rich);
         assert!(
-            !clean.contains("</p><br>")
-                && !clean.contains("<br><h1")
-                && !clean.contains("</h1><br>"),
-            "no <br> should remain adjacent to a block element: {clean}"
+            !clean.contains("First para.</p><br>"),
+            "a <br> between two paragraphs is dropped: {clean}"
+        );
+        assert!(
+            clean.contains("<br><h1") && clean.contains("</h1><br"),
+            "a heading keeps its breaks for separation: {clean}"
         );
         assert!(
             clean.contains("Bare line one.<br>"),
