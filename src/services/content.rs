@@ -431,6 +431,9 @@ fn sanitize_for_matrix(html: &str, mode: RenderMode) -> String {
     // Unwrap `<p>` inside `<li>` (purely-presentational in newsletters) so the
     // list marker and item text render inline instead of on separate lines.
     let cleaned = unwrap_li_paragraphs(&cleaned);
+    // Drop links left holding only a `<br>` (a logo link whose image was dropped)
+    // before the general pruner, so the now-empty parent can collapse too.
+    let cleaned = prune_br_only_links(&cleaned);
     // Remove wrapper elements left empty once images/spacers are gone (e.g. a
     // logo `<h1><a><img></a></h1>` becomes an empty heading in Links mode) so
     // they don't render as tall blank gaps.
@@ -630,6 +633,9 @@ fn prunable_open_name(rest: &str) -> Option<&'static str> {
 
 /// Advance past "blank" content from byte `k`: ASCII/Unicode whitespace, the
 /// non-breaking space char (U+00A0), and `&nbsp;`/`&#160;`/`&#xa0;` entities.
+/// `<br>` is deliberately NOT blank here — a `<p><br></p>` is an intentional blank
+/// line; only links get their lone `<br>` treated as empty (see
+/// [`prune_br_only_links`]).
 fn skip_blank_content(html: &str, mut k: usize) -> usize {
     loop {
         let start = k;
@@ -645,6 +651,42 @@ fn skip_blank_content(html: &str, mut k: usize) -> usize {
             return k;
         }
     }
+}
+
+/// Drop an `<a>` whose only content is whitespace, `&nbsp;`, or `<br>` — e.g. a
+/// logo link left holding just a `<br>` once its image was dropped. Unlike
+/// [`prune_empty_elements`] (which keeps `<p><br></p>`, an intentional blank line),
+/// a lone break inside a *link* is never meaningful, so the whole empty `<a>` goes.
+#[must_use]
+fn prune_br_only_links(html: &str) -> String {
+    let bytes = html.as_bytes();
+    let mut out = String::with_capacity(html.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let rest = &html[i..];
+        if starts_tag(rest, "<a")
+            && let Some(gt) = rest.find('>')
+        {
+            // Skip whitespace/&nbsp;/<br> after the open tag; if the next thing is
+            // the matching close, the link is empty — drop it whole.
+            let open_end = i + gt + 1;
+            let mut k = skip_blank_content(html, open_end);
+            while html[k..].starts_with("<br>") {
+                k = skip_blank_content(html, k + "<br>".len());
+            }
+            if let Some(tail) = html.get(k..)
+                && starts_tag(tail, "</a")
+                && let Some(cgt) = tail.find('>')
+            {
+                i = k + cgt + 1;
+                continue;
+            }
+        }
+        let ch = html[i..].chars().next().unwrap_or(' ');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
 }
 
 /// True if `rest` begins with the tag name `name` (which includes the leading
@@ -1734,6 +1776,29 @@ mod tests {
         assert!(
             clean.contains("Bare line one.<br>"),
             "a break between bare-text lines must survive: {clean}"
+        );
+    }
+
+    #[test]
+    fn link_holding_only_a_br_is_pruned() {
+        use super::{RenderMode, sanitize_for_matrix};
+        // An emptied logo link (image dropped, leaving just a <br>) must not leave
+        // a stray blank line; a link with real text, and content, are kept.
+        let html = "<p>Intro.</p>\
+            <a href=\"https://x.com/\"><br></a>\
+            <a href=\"https://y.com/\">Real link</a>\
+            <p>Body.</p>";
+        let clean = sanitize_for_matrix(html, RenderMode::Rich);
+        assert!(
+            !clean.contains("x.com"),
+            "the <br>-only logo link must be pruned: {clean}"
+        );
+        assert!(
+            clean.contains("Intro.")
+                && clean.contains("Body.")
+                && clean.contains("Real link")
+                && clean.contains("y.com"),
+            "real content and real links must be kept: {clean}"
         );
     }
 
