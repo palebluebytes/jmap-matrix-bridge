@@ -857,16 +857,49 @@ fn img_dimension(tag: &str, name: &str) -> Option<u32> {
     tag_attr(tag, name).and_then(|(v, _)| v.trim().parse::<u32>().ok())
 }
 
-/// Decorative chrome (not worth a marker or a fetch): a tracker/spacer (a
-/// dimension ≤ 2px) or a small square icon (both dimensions present and ≤ 48px,
-/// e.g. social/footer icons). Images without numeric dimensions are treated as
-/// content (not decorative), so anything sized in CSS only still shows.
+/// Substrings that identify an open-tracking pixel / analytics beacon by its
+/// `src` URL. These images are invisible in a real client and never content, so
+/// they get no marker and are never fetched — cleaner AND a privacy win (loading
+/// one would ping the tracker). Conservative and case-insensitive: each fragment
+/// is specific to a tracking endpoint, not a bare word that could match content.
+/// Incomplete by nature — a new platform's tracker slips through until added.
+const TRACKER_URL_MARKERS: &[&str] = &[
+    "servlet.imageserver",   // Salesforce Marketing Cloud
+    "/track/open",           // Mandrill and many ESPs
+    "/wf/open",              // SendGrid / Twilio
+    "list-manage.com/track", // Mailchimp
+    "/open.aspx",
+    "/open.php",
+    "google-analytics.com", // GA measurement beacon
+    "googleadservices.com",
+    "doubleclick.net",
+    "emltrk.com",  // generic email tracker
+    "mailstat.us", // Mailgun opens
+    "/pixel.gif",
+    "/pixel.png",
+    "utm.gif",
+];
+
+/// True if `tag`'s `src` looks like a tracking pixel (see [`TRACKER_URL_MARKERS`]).
+fn is_tracking_pixel(tag: &str) -> bool {
+    tag_attr(tag, "src").is_some_and(|(src, _)| {
+        let lower = src.to_ascii_lowercase();
+        TRACKER_URL_MARKERS.iter().any(|m| lower.contains(m))
+    })
+}
+
+/// Decorative chrome (not worth a marker or a fetch): a tracking pixel (by URL,
+/// [`is_tracking_pixel`]), a tracker/spacer (a dimension ≤ 2px), or a small square
+/// icon (both dimensions present and ≤ 48px, e.g. social/footer icons). Images
+/// without numeric dimensions are otherwise treated as content (sized in CSS), so
+/// anything not matching stays — except a known tracker, which is dropped even
+/// when it declares no dimensions (as Salesforce's `ImageServer` beacon does).
 fn is_decorative_img(tag: &str) -> bool {
     let w = img_dimension(tag, "width");
     let h = img_dimension(tag, "height");
     let spacer = w.is_some_and(|v| v <= 2) || h.is_some_and(|v| v <= 2);
     let tiny_icon = matches!((w, h), (Some(a), Some(b)) if a <= 48 && b <= 48);
-    spacer || tiny_icon
+    spacer || tiny_icon || is_tracking_pixel(tag)
 }
 
 /// Decode the handful of HTML entities that appear inside an `src` URL (chiefly
@@ -2030,6 +2063,36 @@ mod tests {
         assert!(
             !decorative("https://x/photo.png"),
             "standalone photo is content → loadable"
+        );
+    }
+
+    #[test]
+    fn tracking_pixels_are_dropped_by_url() {
+        use super::{RenderMode, extract_remote_images, sanitize_for_matrix};
+        // A Salesforce ImageServer beacon (declares NO dimensions, so the size
+        // rules miss it) and a Mandrill open tracker are dropped in the marker
+        // path and flagged decorative in the load path; a real photo stays.
+        let html = "<p>Hi.</p>\
+            <img src=\"https://x.my.salesforce.com/servlet/servlet.ImageServer?id=abc\">\
+            <img src=\"https://track.example.com/track/open?u=1\">\
+            <img src=\"https://cdn.example.com/photo.png\" width=\"600\">";
+        let out = sanitize_for_matrix(html, RenderMode::Links);
+        assert_eq!(
+            out.matches('🖼').count(),
+            1,
+            "only the real content image is marked: {out}"
+        );
+        let imgs = extract_remote_images(html);
+        let decorative = |u: &str| {
+            imgs.iter()
+                .find(|r| r.url.contains(u))
+                .is_some_and(|r| r.is_decorative)
+        };
+        assert!(decorative("ImageServer"), "salesforce beacon is a tracker");
+        assert!(decorative("track/open"), "mandrill open tracker");
+        assert!(
+            !decorative("photo.png"),
+            "a real content image must still load"
         );
     }
 
