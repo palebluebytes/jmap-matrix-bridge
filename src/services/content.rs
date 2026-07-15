@@ -235,6 +235,24 @@ fn find_ci(haystack: &[u8], needle: &[u8], from: usize) -> Option<usize> {
         .find(|&i| haystack[i..i + needle.len()].eq_ignore_ascii_case(needle))
 }
 
+/// True if the next tag after byte `k` (skipping whitespace and `<!-- -->`
+/// comments) is a `<div>` open — i.e. a `</div>` here is a sibling-section
+/// boundary (`</div><div>`), not the end of a nested wrapper.
+fn next_is_div_open(html: &str, mut k: usize) -> bool {
+    let bytes = html.as_bytes();
+    loop {
+        while k < bytes.len() && bytes[k].is_ascii_whitespace() {
+            k += 1;
+        }
+        let rest = &html[k..];
+        if rest.starts_with("<!--") {
+            k = rest.find("-->").map_or(bytes.len(), |p| k + p + 3);
+            continue;
+        }
+        return starts_tag(rest, "<div");
+    }
+}
+
 /// Replace table tags with lightweight separators *before* the sanitizer runs.
 /// Matrix's allowed-HTML has no table tags, so ammonia drops `<table>`/`<tr>`/`<td>`
 /// keeping only their text — which glues adjacent cells (a `[logo][Feefo][on
@@ -288,9 +306,17 @@ fn separate_table_blocks(html: &str, mode: RenderMode) -> String {
             || starts_tag(rest, "</thead")
             || starts_tag(rest, "</tfoot")
             || starts_tag(rest, "</caption")
-            || (break_divs && starts_tag(rest, "</div"))
         {
-            out.push_str("<br>"); // break rows / whole tables / (links) div sections
+            out.push_str("<br>"); // break rows / whole tables
+        } else if break_divs && starts_tag(rest, "</div") {
+            // A </div> that a sibling <div> follows is a section boundary — emit a
+            // blank line so a title and the next section don't share one line;
+            // otherwise a plain line break. collapse_breaks caps it at one blank line.
+            out.push_str(if next_is_div_open(html, end) {
+                "<br><br>"
+            } else {
+                "<br>"
+            });
         } else if break_divs && starts_tag(rest, "<div") {
             // drop the div open (links unwraps it anyway); its </div> broke above
         } else if !OPEN.iter().any(|t| starts_tag(rest, t)) {
@@ -1814,6 +1840,21 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn sibling_div_sections_get_a_blank_line() {
+        use super::{RenderMode, sanitize_for_matrix};
+        // The Samsonite shape: a CSS-styled title and the next section sit in
+        // sibling <div>s (</div><div>). In Links mode that boundary is a blank
+        // line, not a single break, so the title and greeting don't share a line.
+        let html =
+            "<div>Your parcel is on its way</div><div><strong>Dear customer</strong> Hello.</div>";
+        let out = sanitize_for_matrix(html, RenderMode::Links);
+        assert!(
+            out.contains("on its way<br><br>"),
+            "sibling div sections get a blank line: {out}"
+        );
     }
 
     #[test]
