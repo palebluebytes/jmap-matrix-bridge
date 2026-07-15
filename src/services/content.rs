@@ -898,7 +898,12 @@ fn is_decorative_img(tag: &str) -> bool {
     let w = img_dimension(tag, "width");
     let h = img_dimension(tag, "height");
     let spacer = w.is_some_and(|v| v <= 2) || h.is_some_and(|v| v <= 2);
-    let tiny_icon = matches!((w, h), (Some(a), Some(b)) if a <= 48 && b <= 48);
+    // A tiny icon: both dims small, OR one small dim with the other left to CSS
+    // (`height:auto`) — a `width="20"` social icon is still an icon regardless of
+    // its implied height. Content images declare a larger dimension.
+    let tiny_icon = matches!((w, h), (Some(a), Some(b)) if a <= 48 && b <= 48)
+        || (w.is_some_and(|v| v <= 48) && h.is_none())
+        || (h.is_some_and(|v| v <= 48) && w.is_none());
     spacer || tiny_icon || is_tracking_pixel(tag)
 }
 
@@ -2094,6 +2099,28 @@ mod tests {
             !decorative("photo.png"),
             "a real content image must still load"
         );
+    }
+
+    #[test]
+    fn single_small_dimension_is_a_decorative_icon() {
+        use super::extract_remote_images;
+        // The TUMI-footer shape: a social icon is width="20" with height left to
+        // CSS (no numeric height), so the "both dims small" rule missed it. A
+        // content image with only a large width stays content.
+        let html = "<p>x</p>\
+            <img src=\"https://x/social.png\" width=\"20\">\
+            <img src=\"https://x/hero.png\" width=\"600\">";
+        let imgs = extract_remote_images(html);
+        let dec = |u: &str| {
+            imgs.iter()
+                .find(|r| r.url.contains(u))
+                .is_some_and(|r| r.is_decorative)
+        };
+        assert!(
+            dec("social.png"),
+            "20px-wide icon (auto height) is decorative"
+        );
+        assert!(!dec("hero.png"), "600px-wide content image is not");
     }
 
     #[test]
