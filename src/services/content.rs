@@ -302,6 +302,96 @@ fn separate_table_blocks(html: &str, mode: RenderMode) -> String {
     out
 }
 
+/// Block-level elements that render with their own vertical spacing, so a `<br>`
+/// directly adjacent to one only doubles the gap. `div` is deliberately excluded
+/// (it has no default margin, so its `<br>` is load-bearing separation).
+const BLOCK_TAGS: &[&str] = &[
+    "p",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "ul",
+    "ol",
+    "li",
+    "blockquote",
+    "pre",
+    "hr",
+    "details",
+    "summary",
+];
+
+/// True if the text already emitted ends with a block-level open or close tag.
+fn ends_with_block(out: &str) -> bool {
+    let t = out.trim_end();
+    let Some(open) = t.strip_suffix('>').and_then(|_| t.rfind('<')) else {
+        return false;
+    };
+    let name = t[open + 1..t.len() - 1]
+        .trim_start_matches('/')
+        .split(|c: char| c.is_whitespace() || c == '/' || c == '>')
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    BLOCK_TAGS.contains(&name.as_str())
+}
+
+/// True if `rest` begins (after leading whitespace) with a block open/close tag.
+fn starts_with_block(rest: &str) -> bool {
+    let r = rest.trim_start();
+    BLOCK_TAGS
+        .iter()
+        .any(|b| starts_tag(r, &format!("<{b}")) || starts_tag(r, &format!("</{b}")))
+}
+
+/// End index of a run of one-or-more `<br>` starting at `i` (whitespace allowed
+/// between them), or `None` if there is no `<br>` at `i`.
+fn br_run_end(s: &str, i: usize) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut j = i;
+    let mut found = false;
+    loop {
+        let mut k = j;
+        while k < bytes.len() && matches!(bytes[k], b' ' | b'\t' | b'\n' | b'\r') {
+            k += 1;
+        }
+        if s[k..].starts_with("<br>") {
+            j = k + "<br>".len();
+            found = true;
+        } else {
+            break;
+        }
+    }
+    found.then_some(j)
+}
+
+/// Drop `<br>` runs sitting right after a block close/open or right before a
+/// block open/close — the block already breaks the line, so the `<br>` only adds
+/// an empty line. A newsletter that wraps paragraphs in `<p>`/`<h1>` AND pads them
+/// with `<br>` otherwise renders as tall double gaps. Bare-text breaks (no
+/// adjacent block) are kept, so genuine line breaks survive.
+#[must_use]
+fn strip_block_adjacent_breaks(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        if let Some(run_end) = br_run_end(s, i) {
+            // Redundant beside a block — drop; otherwise it's a bare-text break — keep.
+            if !(ends_with_block(&out) || starts_with_block(&s[run_end..])) {
+                out.push_str(&s[i..run_end]);
+            }
+            i = run_end;
+            continue;
+        }
+        let ch = s[i..].chars().next().unwrap_or(' ');
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    out
+}
+
 /// Sanitize an HTML email body into a Matrix `formatted_body` that is provably
 /// conformant to the Matrix spec's allowed-HTML subset (spec.matrix.org), using
 /// `ammonia` as an allowlist sanitizer. Anything outside the allowlist is either
@@ -349,6 +439,9 @@ fn sanitize_for_matrix(html: &str, mode: RenderMode) -> String {
     // blocks down to a single space (a lone `&nbsp;`, e.g. around a button
     // label, is left intact).
     let cleaned = collapse_blank_runs(&cleaned);
+    // Drop <br> that only doubles a block element's own margin (a <p>/<h1>
+    // padded with <br> renders as a tall gap otherwise).
+    let cleaned = strip_block_adjacent_breaks(&cleaned);
     // Collapse the `<br>` ladders ProtonMail-style composers leave (empty
     // paragraphs) so the body isn't padded with blank lines.
     collapse_breaks(&cleaned)
@@ -1621,6 +1714,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn br_adjacent_to_block_elements_is_dropped() {
+        use super::{RenderMode, sanitize_for_matrix};
+        // The real N26 shape: paragraphs wrapped in <p>/<h1> AND padded with <br>,
+        // which renders as tall double gaps. The block already breaks the line, so
+        // the adjacent <br> is dropped; a break between bare-text lines is kept.
+        let html = "<p>First para.</p><br><br><h1>A Heading</h1><br><p>Second para.</p>\
+            Bare line one.<br><br>Bare line two.";
+        let clean = sanitize_for_matrix(html, RenderMode::Rich);
+        assert!(
+            !clean.contains("</p><br>")
+                && !clean.contains("<br><h1")
+                && !clean.contains("</h1><br>"),
+            "no <br> should remain adjacent to a block element: {clean}"
+        );
+        assert!(
+            clean.contains("Bare line one.<br>"),
+            "a break between bare-text lines must survive: {clean}"
+        );
     }
 
     #[test]
