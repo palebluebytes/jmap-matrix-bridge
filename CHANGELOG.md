@@ -8,6 +8,29 @@ From v0.3.0 onward this file is maintained automatically by
 [release-plz](https://release-plz.dev) from the Conventional Commit history
 (see [ADR-0008](docs/adr/0008-ci-and-release-flow.md)).
 
+## [0.3.2](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.3.1...v0.3.2) - 2026-07-16
+
+### Added
+
+- drop tracking-pixel images by URL (no marker, never fetched)
+- separate table cells/rows so linearized layouts don't glue
+- drop structural chrome images instead of marking them
+
+### Fixed
+
+- *(examples)* render emails with real content types, not forced html
+- blank line between sibling <div> sections (title vs greeting)
+- keep <br> breathing room around headings
+- treat a single small img dimension (auto other side) as a decorative icon
+- prune links whose only content is a <br>
+- drop <br> adjacent to block elements to remove double gaps
+- keep table/section breaks that HTML5 foster-parenting dropped
+
+### Other
+
+- rustfmt render_gallery example
+- add render_email/render_gallery examples for offline HTML review
+
 ## [0.3.1](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.3.0...v0.3.1) - 2026-07-08
 
 ### Other
