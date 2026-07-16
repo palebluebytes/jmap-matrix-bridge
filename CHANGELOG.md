@@ -8,6 +8,12 @@ From v0.3.0 onward this file is maintained automatically by
 [release-plz](https://release-plz.dev) from the Conventional Commit history
 (see [ADR-0008](docs/adr/0008-ci-and-release-flow.md)).
 
+## [0.4.0](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.3.2...v0.4.0) - 2026-07-16
+
+### Added
+
+- *(send-delay)* [**breaking**] disable the hold window by default
+
 ## [0.3.2](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.3.1...v0.3.2) - 2026-07-16
 
 ### Added
