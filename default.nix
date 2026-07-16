@@ -95,9 +95,12 @@ let
       # so these self-contained tests (full bridge cycle, backfill) can run.
       SSL_CERT_FILE = "${cacert}/etc/ssl/certs/ca-bundle.crt";
 
-      # We skip external network integrations and specify individual exclusions with the
-      # nextest filterset DSL (-E / --filterset; the old `--filter` flag was removed upstream).
-      cargoNextestExtraArgs = "-E 'not (test(test_matrix_login_payload) or test(test_sender_flow) or test(test_multi_user_login_integration) or test(test_poll_hits_jmap_and_matrix_endpoints))'";
+      # No exclusions: every test is hermetic (wiremock on 127.0.0.1), so the
+      # sandbox runs the whole suite. The old exclusion list was written when
+      # these tests were thought to need external network; SSL_CERT_FILE above
+      # is what they actually needed. It let `test_sender_flow` sit broken on
+      # main — see the note in tests/jmap_mock_test.rs. Exclude a test here only
+      # if it genuinely reaches the network, and say which and why.
     }
   );
 
