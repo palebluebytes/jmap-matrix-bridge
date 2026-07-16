@@ -19,6 +19,10 @@ check:
 run:
     cargo run -- --config config.yaml
 
+# Boot the local sandbox VM (Stalwart + tuwunel + bridge). See nix/playground/README.md
+playground:
+    nix run .#playground
+
 # Lint code thoroughly (library, binary, tests, examples)
 lint:
     cargo clippy-all

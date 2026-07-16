@@ -31,6 +31,19 @@
 
         # Host-agnostic systemd/packaging module (services.jmap-bridge.*).
         nixosModules.jmap-bridge = ./nix/module;
+
+        # A disposable local VM that runs the whole stack (Stalwart + tuwunel +
+        # the bridge) with its Matrix/JMAP ports forwarded to the host, so you
+        # can drive the bridge by hand from a real Matrix client. Boot it with
+        # `nix run .#playground`. See nix/playground/README.md. x86_64-only
+        # (nixosTest-class VMs run on the builder's platform, like the check).
+        nixosConfigurations.playground = inputs.nixpkgs.lib.nixosSystem {
+          system = "x86_64-linux";
+          specialArgs = {
+            self = inputs.self;
+          };
+          modules = [ ./nix/playground ];
+        };
       };
 
       perSystem =
@@ -86,6 +99,16 @@
           packages.default = bridge;
           packages.static = staticBridge;
           packages.dockerImage = dockerImage;
+
+          # `nix run .#playground` — boot the local sandbox VM (see the
+          # nixosConfigurations.playground above). Gated to x86_64 like the VM
+          # check, since QEMU/nixosTest VMs build for the host platform.
+          apps = lib.optionalAttrs (system == "x86_64-linux") {
+            playground = {
+              type = "app";
+              program = "${inputs.self.nixosConfigurations.playground.config.system.build.vm}/bin/run-jmap-playground-vm";
+            };
+          };
 
           # Dev shell entered via `nix develop` / `direnv` (see .envrc). Inherits
           # the package's build inputs + Rust toolchain from crane, then layers on

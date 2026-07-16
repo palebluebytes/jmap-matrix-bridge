@@ -23,3 +23,7 @@ bridge.db-wal
 
 # Generated appservice registration (may contain tokens)
 registration.yaml
+
+# Playground VM scratch artifacts
+jmap-playground.qcow2
+result-playground-vm
