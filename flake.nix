@@ -13,6 +13,28 @@
 
   outputs =
     inputs@{ flake-parts, ... }:
+    let
+      # A disposable local VM that runs the whole stack (Stalwart + tuwunel +
+      # the bridge) with its Matrix/JMAP ports forwarded to the host, so you can
+      # drive the bridge by hand from a real Matrix client. Boot it with
+      # `nix run .#playground`. See nix/playground/README.md. x86_64-only
+      # (nixosTest-class VMs run on the builder's platform, like the check).
+      #
+      # A plain `let` binding, deliberately not a `nixosConfigurations` output:
+      # this only ever runs as `.config.system.build.vm`, where qemu-vm.nix
+      # supplies the root filesystem and bootloader. `nix flake check` evaluates
+      # every `nixosConfigurations.*.config.system.build.toplevel`, which asserts
+      # a root fs and bootloader that a VM-only module has no business defining —
+      # so exposing it there took the whole flake check down with it. The VM is
+      # still evaluation-gated via `apps.playground` below.
+      playgroundSystem = inputs.nixpkgs.lib.nixosSystem {
+        system = "x86_64-linux";
+        specialArgs = {
+          self = inputs.self;
+        };
+        modules = [ ./nix/playground ];
+      };
+    in
     flake-parts.lib.mkFlake { inherit inputs; } {
       systems = [
         "x86_64-linux"
@@ -32,18 +54,6 @@
         # Host-agnostic systemd/packaging module (services.jmap-bridge.*).
         nixosModules.jmap-bridge = ./nix/module;
 
-        # A disposable local VM that runs the whole stack (Stalwart + tuwunel +
-        # the bridge) with its Matrix/JMAP ports forwarded to the host, so you
-        # can drive the bridge by hand from a real Matrix client. Boot it with
-        # `nix run .#playground`. See nix/playground/README.md. x86_64-only
-        # (nixosTest-class VMs run on the builder's platform, like the check).
-        nixosConfigurations.playground = inputs.nixpkgs.lib.nixosSystem {
-          system = "x86_64-linux";
-          specialArgs = {
-            self = inputs.self;
-          };
-          modules = [ ./nix/playground ];
-        };
       };
 
       perSystem =
@@ -101,12 +111,12 @@
           packages.dockerImage = dockerImage;
 
           # `nix run .#playground` — boot the local sandbox VM (see the
-          # nixosConfigurations.playground above). Gated to x86_64 like the VM
-          # check, since QEMU/nixosTest VMs build for the host platform.
+          # playgroundSystem binding above). Gated to x86_64 like the VM check,
+          # since QEMU/nixosTest VMs build for the host platform.
           apps = lib.optionalAttrs (system == "x86_64-linux") {
             playground = {
               type = "app";
-              program = "${inputs.self.nixosConfigurations.playground.config.system.build.vm}/bin/run-jmap-playground-vm";
+              program = "${playgroundSystem.config.system.build.vm}/bin/run-jmap-playground-vm";
             };
           };
 
