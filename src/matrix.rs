@@ -151,6 +151,20 @@ impl MatrixClient {
         .await
     }
 
+    /// Set a room's avatar to an already-uploaded `mxc://` URI. Written as the
+    /// bot via `m.room.avatar` state. Used to brand the email space with the
+    /// bridge logo (the same `mxc` we store for the bot's profile picture), so
+    /// clients show it instead of an auto-generated letter tile.
+    pub async fn set_room_avatar(&self, room_id: &str, mxc_url: &str) -> Result<()> {
+        self.put_state(
+            room_id,
+            "m.room.avatar",
+            "",
+            &serde_json::json!({ "url": mxc_url }),
+        )
+        .await
+    }
+
     /// Best-effort read of a room's current name from the state API, or `None`
     /// if unset/unreadable. Used to pick the subject for a fresh outbound email.
     pub async fn room_name(&self, room_id: &str) -> Option<String> {

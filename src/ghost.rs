@@ -152,6 +152,25 @@ async fn create_email_space(
     );
     let space = matrix.create_space(&name, &topic, matrix_user_id).await?;
     info!("Created email space {space} ({name}) for {matrix_user_id}");
+
+    // Brand the space with the bridge logo. `main.rs` uploads the logo once at
+    // startup and stores its `mxc` in `bot_avatar` ("<hash> <mxc>"); reuse that
+    // rather than re-uploading. Best-effort — a missing/failed avatar must not
+    // block the space, and the space is unusable without it either way.
+    match store.get_bridge_state("bot_avatar").await {
+        Ok(Some(state)) => {
+            if let Some(mxc) = state.split_whitespace().nth(1) {
+                if let Err(e) = matrix.set_room_avatar(&space, mxc).await {
+                    warn!("Failed to set email space avatar for {matrix_user_id}: {e}");
+                }
+            } else {
+                warn!("bot_avatar state {state:?} has no mxc; skipping space avatar");
+            }
+        }
+        Ok(None) => warn!("No bot_avatar state yet; email space {space} created without avatar"),
+        Err(e) => warn!("Failed to read bot_avatar state: {e}"),
+    }
+
     Ok(space)
 }
 

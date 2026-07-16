@@ -1,7 +1,8 @@
 #![allow(clippy::unwrap_used)]
 
-//! Tests for the email-space helpers: creating a room with `type: m.space` and
-//! linking a child room into it via `m.space.child` / `m.space.parent`.
+//! Tests for the email-space helpers: creating a room with `type: m.space`,
+//! linking a child room into it via `m.space.child` / `m.space.parent`, and
+//! branding it with the bridge logo via `m.room.avatar`.
 
 use jmap_matrix_bridge::matrix::MatrixClient;
 use wiremock::matchers::{body_partial_json, method, path};
@@ -76,4 +77,35 @@ async fn add_room_to_space_writes_child_and_parent() {
         .await
         .unwrap();
     // Server drop verifies both the child and parent state events were written.
+}
+
+#[tokio::test]
+async fn set_room_avatar_writes_mxc_url() {
+    let server = MockServer::start().await;
+
+    // The avatar must be written as `m.room.avatar` state carrying the mxc in
+    // `url` — that is what clients read to render the space tile. A mismatched
+    // body means this mock won't match and the call errors, failing the test.
+    Mock::given(method("PUT"))
+        .and(path(
+            "/_matrix/client/v3/rooms/!space:localhost/state/m.room.avatar/",
+        ))
+        .and(body_partial_json(
+            serde_json::json!({ "url": "mxc://localhost/logo" }),
+        ))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "event_id": "$a" })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let matrix = MatrixClient::new(&server.uri(), "as_token", "localhost")
+        .await
+        .unwrap();
+
+    matrix
+        .set_room_avatar("!space:localhost", "mxc://localhost/logo")
+        .await
+        .unwrap();
 }
