@@ -1,14 +1,18 @@
-//! Render many emails' original HTML through the bridge's real content pipeline
-//! and emit a single self-contained HTML gallery — so you can eyeball how every
-//! bridged email looks under the *current* code (both render modes), without a
-//! homeserver or a deploy.
+//! Render many real emails through the bridge's own content pipeline and emit a
+//! single self-contained HTML gallery — so you can eyeball how every bridged
+//! email looks under the *current* code, without a homeserver or a deploy.
 //!
-//! Input: a JSON array of `{ "subject": ..., "from": ..., "html": ... }` objects
-//! (produce it with a JMAP fetch of each email's `htmlBody`). Reads the file named
-//! in argv, or stdin. Writes the gallery HTML to stdout.
+//! Input: a JSON array of raw JMAP `Email/get` objects, each carrying its real
+//! `subject`, `from`, `textBody`, `htmlBody` and `bodyValues` (produce it with
+//! `fetch_all_emails_html.py`). Because the objects are fed straight into
+//! `EmailBody::from_email` — the same function the bridge runs — the gallery is
+//! faithful: an email with no genuine `text/html` part renders as plain text
+//! (quotes stripped) exactly as it would in Matrix, instead of being forced
+//! through the HTML path. Reads the file named in argv, or stdin. Writes the
+//! gallery HTML to stdout.
 //!
 //! Usage:
-//!   `cargo run --example render_gallery -- emails_html.json > new_rendering.html`
+//!   `cargo run --example render_gallery -- emails.json > new_rendering.html`
 
 use std::io::Read;
 
@@ -26,6 +30,7 @@ main{max-width:960px;margin:0 auto;padding:20px}\
 .subj{font-weight:600}.from{color:var(--mut);font-size:13px}\
 .body{padding:12px 14px}.lbl{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);margin:0 0 6px}\
 .render{border:1px dashed var(--line);border-radius:8px;padding:10px;background:var(--bg)}\
+.render.plain{white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px}\
 .render img{max-width:100%}.render blockquote{border-left:3px solid var(--line);margin:.3em 0;padding-left:.8em;color:var(--mut)}\
 .render ul{padding-left:1.3em}";
 
@@ -47,7 +52,8 @@ fn main() {
         |path| std::fs::read_to_string(&path).expect("read JSON file"),
     );
 
-    let emails: Vec<serde_json::Value> = serde_json::from_str(&input).expect("parse JSON array");
+    let entries: Vec<serde_json::Value> =
+        serde_json::from_str(&input).expect("parse JSON array of JMAP Email objects");
 
     let mut out = String::new();
     out.push_str("<!doctype html><meta charset=utf-8><title>New rendering — all emails</title>");
@@ -55,42 +61,53 @@ fn main() {
     out.push_str(CSS);
     out.push_str("</style><header><h1>All emails — current rendering code</h1>");
     out.push_str("<div class=sub>");
-    out.push_str(&emails.len().to_string());
+    out.push_str(&entries.len().to_string());
     out.push_str(
-        " emails · Links-mode <code>formatted_body</code> (what a client shows) · \
-         mxc images absent (no homeserver auth)</div></header><main>",
+        " emails · fed through <code>EmailBody::from_email</code> (Links mode) · \
+         plain-text emails show their plain body · mxc images absent (no homeserver auth)\
+         </div></header><main>",
     );
 
-    for e in &emails {
-        let subject = e
-            .get("subject")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("(no subject)");
-        let from = e
-            .get("from")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
-        let html = e
-            .get("html")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
+    for entry in &entries {
+        // Deserialize the raw JMAP object into the very type the bridge renders,
+        // so content-type handling (html vs plain) matches production exactly.
+        let email: jmap_client::email::Email = match serde_json::from_value(entry.clone()) {
+            Ok(email) => email,
+            Err(err) => {
+                eprintln!("skip: could not parse JMAP Email: {err}");
+                continue;
+            }
+        };
 
-        let email: jmap_client::email::Email = serde_json::from_value(serde_json::json!({
-            "id": "g", "threadId": "t",
-            "htmlBody": [{ "partId": "1", "type": "text/html" }],
-            "bodyValues": { "1": { "value": html, "isTruncated": false } }
-        }))
-        .expect("build Email");
+        let subject = email.subject().unwrap_or("(no subject)");
+        let from = email
+            .from()
+            .and_then(<[_]>::first)
+            .map_or("", |a| a.name().unwrap_or_else(|| a.email()));
+
         let rendered = EmailBody::from_email(&email, RenderMode::Links);
-        let formatted = rendered.html.unwrap_or_else(|| esc(&rendered.plain));
+        // A genuine `formatted_body` means the email had a real HTML part. When
+        // it's absent, Matrix shows the plain `body` verbatim — so do the same,
+        // in a whitespace-preserving block, rather than faking HTML.
+        let (label, class, content) = match &rendered.html {
+            Some(html) => ("formatted_body (rendered)", "render", html.clone()),
+            None => (
+                "plain body (no HTML part — client shows plain text)",
+                "render plain",
+                esc(&rendered.plain),
+            ),
+        };
 
         out.push_str("<div class=card><div class=hd><span class=subj>");
         out.push_str(&esc(subject));
         out.push_str("</span><span class=from>");
         out.push_str(&esc(from));
-        out.push_str("</span></div><div class=body><div class=lbl>formatted_body (rendered)</div>");
-        out.push_str("<div class=render>");
-        out.push_str(&formatted);
+        out.push_str("</span></div><div class=body><div class=lbl>");
+        out.push_str(label);
+        out.push_str("</div><div class=\"");
+        out.push_str(class);
+        out.push_str("\">");
+        out.push_str(&content);
         out.push_str("</div></div></div>");
     }
     out.push_str("</main>");
