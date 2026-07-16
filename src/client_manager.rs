@@ -47,8 +47,9 @@ pub struct ClientManager {
 
 /// Upper bound on the send-delay window — a typo can't hold mail for hours.
 pub const MAX_SEND_DELAY_SECS: i64 = 300;
-/// Out-of-the-box default send-delay window.
-pub const DEFAULT_SEND_DELAY_SECS: i64 = 5;
+/// Out-of-the-box default send-delay window. Off (0) while the hold/undo feature
+/// is WIP; operators re-enable it with `--send-delay-default` / `SEND_DELAY_DEFAULT`.
+pub const DEFAULT_SEND_DELAY_SECS: i64 = 0;
 
 impl std::fmt::Debug for ClientManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

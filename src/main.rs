@@ -113,9 +113,10 @@ enum Commands {
         quote_replies: bool,
 
         /// Default send-delay (undo) window in seconds before outbound mail is
-        /// submitted (ADR-0012). 5s out of the box; a user can override with the
-        /// `send-delay` command. Clamped to 0..=300; 0 disables the hold.
-        #[arg(long, env = "SEND_DELAY_DEFAULT", default_value = "5")]
+        /// submitted (ADR-0012). Off by default (0) while the feature is WIP; set
+        /// a positive value here (or per-user via the `send-delay` command) to
+        /// re-enable the hold. Clamped to 0..=300.
+        #[arg(long, env = "SEND_DELAY_DEFAULT", default_value = "0")]
         send_delay_default: i64,
 
         /// Matrix Homeserver URL
