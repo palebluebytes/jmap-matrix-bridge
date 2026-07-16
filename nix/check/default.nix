@@ -244,7 +244,7 @@ pkgs.testers.nixosTest {
     print("=== create domain ===")
     print(machine.execute(
         "curl -sS " + ADMIN + " -X POST " + MGMT + "/api/principal " + HDR
-        + " -d " + json_arg(json.dumps({"type": "domain", "name": "localhost"})))[1])
+        + " -d " + json_arg(json.dumps({"type": "domain", "name": "example.com"})))[1])
     print("=== create individual ===")
     # The `user` role grants the JMAP/IMAP/SMTP permissions. Accounts made via
     # the raw management API do NOT inherit a role by default (the admin UI adds
@@ -256,11 +256,27 @@ pkgs.testers.nixosTest {
             "type": "individual",
             "name": "bridgeuser",
             "secrets": ["bridgepass"],
-            "emails": ["bridgeuser@localhost"],
+            "emails": ["bridgeuser@example.com"],
             "roles": ["user"],
         })))[1])
     print("=== bridgeuser principal (roles/permissions) ===")
     print(machine.execute("curl -sS " + ADMIN + " " + MGMT + "/api/principal/bridgeuser")[1])
+
+    # A second LOCAL account: the outbound reply is addressed to alice@example.com,
+    # and because example.com is a local Stalwart domain, the submission is
+    # DELIVERED internally into this account's Inbox (no external MX / no network).
+    # That lets the OUTBOUND section below assert real end-to-end delivery, not
+    # just that the submission was accepted.
+    print("=== create recipient alice@example.com ===")
+    print(machine.execute(
+        "curl -sS " + ADMIN + " -X POST " + MGMT + "/api/principal " + HDR
+        + " -d " + json_arg(json.dumps({
+            "type": "individual",
+            "name": "alice",
+            "secrets": ["alicepass"],
+            "emails": ["alice@example.com"],
+            "roles": ["user"],
+        })))[1])
 
     # Gate: the JMAP account must resolve with an Inbox before starting the bridge.
     # Stalwart serves the session at /jmap/session; /.well-known/jmap 307-redirects
@@ -282,6 +298,21 @@ pkgs.testers.nixosTest {
         timeout=60).strip()
     print("inboxId=" + inbox_id)
 
+    # ── Give the account a sending identity ──────────────────────────────────────
+    # Stalwart does NOT auto-create identities, and submit() (src/sender.rs) binds
+    # every EmailSubmission to whatever Identity/get returns — so without this the
+    # From is unroutable and every submission is rejected. Creating it here (with a
+    # valid example.com address; localhost/.test are rejected as invalid) is what
+    # lets the OUTBOUND section assert the ACCEPTED+DELIVERED path.
+    print("=== create sending identity for bridgeuser ===")
+    print(machine.succeed(
+        "curl -sS " + AUTH + " -X POST " + JMAP + "/jmap " + HDR + " -d " + json_arg(json.dumps({
+            "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:submission"],
+            "methodCalls": [["Identity/set", {"accountId": account_id, "create": {
+                "id1": {"name": "Bridge User", "email": "bridgeuser@example.com"},
+            }}, "0"]],
+        })) + " | tee /dev/stderr | jq -e -r '.methodResponses[0][1].created.id1.id'"))
+
     # ── Start the bridge (auto-logs-in @admin:localhost with bridgeuser creds) ───
     machine.succeed("systemctl start jmap-bridge.service")
     machine.wait_for_unit("jmap-bridge.service")
@@ -301,7 +332,7 @@ pkgs.testers.nixosTest {
                         "mailboxIds": {inbox_id: True},
                         "keywords": {"$seen": False},
                         "from": [{"name": "Alice Tester", "email": "alice@example.com"}],
-                        "to": [{"email": "bridgeuser@localhost"}],
+                        "to": [{"email": "bridgeuser@example.com"}],
                         "subject": "Round-trip probe",
                         "bodyStructure": {"type": "text/plain", "partId": "b1"},
                         "bodyValues": {"b1": {"value": "Hello from JMAP injection"}},
@@ -434,27 +465,52 @@ pkgs.testers.nixosTest {
             "outbound reply must quote the parent message body: " + repr(out_body)
         print("QUOTE-REPLIES assertion passed (outbound reply quotes the parent, email-layer only)")
 
-        # ── SUBMISSION-RESPONSE check ────────────────────────────────────────
+        # ── SUBMISSION-ACCEPTED + DELIVERED check ────────────────────────────
         # Filing the copy in Sent (above) is NOT proof of delivery: the separate
-        # EmailSubmission/set can still be rejected. submit() (src/sender.rs)
-        # therefore inspects the submission response and fails loudly instead of
+        # EmailSubmission/set is what actually queues the message, and submit()
+        # (src/sender.rs) inspects its response and fails loudly rather than
         # reporting a phantom success -- the regression that silently dropped
         # Matrix->email replies.
         #
-        # This VM can only exercise the *rejection* half of that check: Stalwart
-        # refuses to provision a sending identity for a management-API account
-        # (Identity/set -> "Invalid e-mail address", Identity/get -> []), so the
-        # bridge's From is unroutable and every submission is rejected. We assert
-        # the bridge SURFACES that (error + retry queue) rather than swallowing
-        # it. On a provisioned server (kelpy) the submission is accepted and this
-        # branch is simply not hit.
+        # Because the account now has a sending identity (created above) and the
+        # recipient alice@example.com is a LOCAL account on a LOCAL domain, the
+        # submission is accepted AND delivered internally. We assert BOTH halves:
+        #   1. the worker logged success and did not fall into the retry path;
+        #   2. the message really arrived in alice's Inbox, From the bridge.
         machine.wait_until_succeeds(
-            "journalctl -u jmap-bridge | grep -q 'the JMAP submission was rejected'",
-            timeout=30)
-        machine.wait_until_succeeds(
-            "journalctl -u jmap-bridge | grep -q 'adding to retry queue'",
-            timeout=30)
-        print("SUBMISSION-RESPONSE assertion passed (rejection surfaced + queued, not silently succeeded)")
+            "journalctl -u jmap-bridge | grep -q 'Submitted outbound message'",
+            timeout=60)
+        assert machine.execute(
+            "journalctl -u jmap-bridge | grep -q 'the JMAP submission was rejected'")[0] != 0, \
+            "the submission must NOT be rejected now that a sending identity exists"
+        print("SUBMISSION accepted (worker logged success, no rejection)")
+
+        ALICE = "-u alice:alicepass"
+        alice_acct = machine.wait_until_succeeds(
+            "curl -sS " + ALICE + " " + JMAP + "/jmap/session "
+            "| jq -e -r '.primaryAccounts[\"urn:ietf:params:jmap:mail\"]'",
+            timeout=30).strip()
+        alice_inbox = machine.wait_until_succeeds(
+            "curl -sS " + ALICE + " -X POST " + JMAP + "/jmap " + HDR + " -d " + json_arg(json.dumps({
+                "using": USING,
+                "methodCalls": [["Mailbox/query", {"accountId": alice_acct, "filter": {"role": "inbox"}}, "0"]],
+            })) + " | jq -e -r '.methodResponses[0][1].ids[0]'",
+            timeout=30).strip()
+        # The delivered copy lands in alice's Inbox; assert its From is the bridge.
+        delivered_from = machine.wait_until_succeeds(
+            "curl -sS " + ALICE + " -X POST " + JMAP + "/jmap " + HDR + " -d " + json_arg(json.dumps({
+                "using": USING,
+                "methodCalls": [
+                    ["Email/query", {"accountId": alice_acct, "filter": {"inMailbox": alice_inbox}}, "0"],
+                    ["Email/get", {"accountId": alice_acct,
+                                   "#ids": {"resultOf": "0", "name": "Email/query", "path": "/ids"},
+                                   "properties": ["from", "subject"]}, "1"],
+                ],
+            })) + " | jq -e -r '.methodResponses[1][1].list[0].from[0].email'",
+            timeout=60).strip()
+        assert delivered_from == "bridgeuser@example.com", \
+            "outbound reply must be delivered to alice From the bridge identity: " + delivered_from
+        print("DELIVERY assertion passed (submission accepted + delivered locally to alice)")
     finally:
         print("=== BRIDGE LOGS (after outbound) ===")
         print(machine.execute("journalctl -u jmap-bridge")[1])
@@ -501,7 +557,7 @@ pkgs.testers.nixosTest {
                     "mailboxIds": {inbox_id: True},
                     "keywords": {"$seen": False},
                     "from": [{"name": "Alice Tester", "email": "alice@example.com"}],
-                    "to": [{"email": "bridgeuser@localhost"}],
+                    "to": [{"email": "bridgeuser@example.com"}],
                     "subject": "Re: Round-trip probe",
                     "inReplyTo": [out_msgid],
                     "references": [m1_msgid, out_msgid],
@@ -513,10 +569,10 @@ pkgs.testers.nixosTest {
 
         # The contact reply must reach Matrix. Gate on THIS email specifically
         # (message_mapping is keyed by jmap_email_id) rather than a total row
-        # count: this VM cannot grant the bridge a sending identity, so the
-        # bridge never learns its own address and cannot drop its own Sent copy
-        # as self-authored (kelpy, which has an identity, does drop it). A
-        # precise total would therefore race against that extra self-copy row.
+        # count: the bridge now has a sending identity, so it knows its own
+        # address (bridgeuser@example.com) and drops its own Sent copy as
+        # self-authored -- but gating on this reply's id keeps the assertion
+        # precise and immune to any incidental self-copy bookkeeping.
         have_reply = ("sqlite3 " + DB + " \"SELECT COUNT(*) FROM message_mapping "
                       "WHERE jmap_email_id='" + reply_id + "';\" | grep -q '^1$'")
         try:
