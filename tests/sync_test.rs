@@ -10,7 +10,7 @@ use jmap_matrix_bridge::ingest::JmapPoller;
 use jmap_matrix_bridge::matrix::MatrixClient;
 use jmap_matrix_bridge::store::Store;
 use std::sync::Arc;
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{body_string_contains, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
@@ -66,7 +66,10 @@ async fn test_poll_hits_jmap_and_matrix_endpoints() {
         .mount(&mock_server)
         .await;
 
-    // Mock Email/query (called by poll -> sync_emails)
+    // Mock Email/query (called by poll -> sync_emails). Returns a real id: an
+    // empty `ids` list short-circuits the `if !email_ids.is_empty()` guard in
+    // sync_emails, so the entire email→Matrix path never runs and the Matrix
+    // mocks below become unreachable — which is what this test used to do.
     Mock::given(method("POST"))
         .and(path("/api"))
         .and(|request: &wiremock::Request| {
@@ -76,12 +79,51 @@ async fn test_poll_hits_jmap_and_matrix_endpoints() {
         })
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "sessionState": "s1",
-            "methodResponses": [["Email/query", {"accountId": "A123", "ids": [], "queryState": "s1", "canCalculateChanges": false, "position": 0}, "0"]]
+            "methodResponses": [["Email/query", {"accountId": "A123", "ids": ["E1"], "queryState": "s1", "canCalculateChanges": false, "position": 0}, "0"]]
         })))
+        .expect(1)
         .mount(&mock_server)
         .await;
 
-    // Mock Email/get
+    // Mock the Email/get that FETCHES the email (ids: ["E1"]). Mounted before the
+    // bootstrap mock below: sync_emails issues two distinct Email/get calls — this
+    // one, and a bootstrap with `ids: []` purely to read the changes state — and
+    // they need different responses.
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(|request: &wiremock::Request| {
+            let json: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let method_calls = json.get("methodCalls").unwrap().as_array().unwrap();
+            let call = method_calls[0].as_array().unwrap();
+            call[0].as_str().unwrap() == "Email/get"
+                && call[1]
+                    .get("ids")
+                    .and_then(|ids| ids.as_array())
+                    .is_some_and(|ids| !ids.is_empty())
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Email/get", {
+                "accountId": "A123",
+                "state": "s1",
+                "notFound": [],
+                "list": [{
+                    "id": "E1",
+                    "threadId": "T1",
+                    "subject": "Hello from Alice",
+                    "from": [{"name": "Alice", "email": "alice@example.com"}],
+                    "to": [{"email": "user@example.com"}],
+                    "receivedAt": "2026-01-01T00:00:00Z",
+                    "textBody": [{"partId": "b1", "type": "text/plain"}],
+                    "bodyValues": {"b1": {"value": "Hello world from Alice"}}
+                }]
+            }, "0"]]
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    // Mock the Email/get state bootstrap (ids: []).
     Mock::given(method("POST"))
         .and(path("/api"))
         .and(|request: &wiremock::Request| {
@@ -96,19 +138,34 @@ async fn test_poll_hits_jmap_and_matrix_endpoints() {
         .mount(&mock_server)
         .await;
 
-    // Mock Matrix ensure_user_exists (called by poll mock demo section)
+    // Mock Matrix ensure_user_exists — registering the ghost for alice@example.com.
     Mock::given(method("POST"))
         .and(path("/_matrix/client/v3/register"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .expect(1..)
         .mount(&mock_server)
         .await;
 
-    // Mock Matrix createRoom (called by poll mock demo section)
+    // Mock Matrix createRoom — the email space and the contact room.
     Mock::given(method("POST"))
         .and(path("/_matrix/client/v3/createRoom"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "room_id": "!room1:localhost"
         })))
+        .expect(1..)
+        .mount(&mock_server)
+        .await;
+
+    // THE ORACLE this test is named for: the email's body must actually reach a
+    // Matrix room. Pinning the rendered content proves the whole JMAP→Matrix path
+    // ran — not merely that poll() returned Ok, which it does even when every
+    // email fails to bridge (sync/email.rs swallows per-email errors by design).
+    Mock::given(method("PUT"))
+        .and(body_string_contains("Hello world from Alice"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "event_id": "$msg1" })),
+        )
+        .expect(1)
         .mount(&mock_server)
         .await;
 
