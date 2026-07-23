@@ -285,7 +285,7 @@ impl JmapPoller {
         let ghost = self.resolve_ghost(email).await?;
         let body = EmailBody::from_email(email, self.render_mode);
 
-        if let Some((_root_event_id, room_id, _latest_event_id)) =
+        let result = if let Some((_root_event_id, room_id, _latest_event_id)) =
             self.store.get_thread_info(thread_id).await?
         {
             tracing::debug!(
@@ -300,7 +300,20 @@ impl JmapPoller {
                 thread_id
             );
             self.process_new_thread(email, &ghost, &body).await
+        };
+
+        // If the mail was ALREADY read in the client ($seen) at first bridge —
+        // the common case for backfilled/initial-sync history — mirror that read
+        // state to Matrix now, so it doesn't sit falsely unread. The mirror below
+        // otherwise fires only when an already-mapped email re-appears via
+        // Email/changes carrying $seen, and unchanged history never re-appears, so
+        // without this it would never reconcile. sync_read_state is gated
+        // internally on $seen + once-per-email and resolves the event via the
+        // message mapping the bridge step just saved, so it must run after success.
+        if result.is_ok() {
+            self.sync_read_state(email).await;
         }
+        result
     }
 
     /// Mirror an already-bridged email's read state from JMAP to Matrix, both

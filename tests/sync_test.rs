@@ -949,6 +949,201 @@ async fn test_new_thread_joins_real_user_before_posting_message() {
     );
 }
 
+/// A mail that is ALREADY read in the client ($seen) when the bridge first
+/// ingests it — the common case for backfilled/initial-sync history — must have
+/// its read state mirrored to Matrix immediately, so it doesn't sit falsely
+/// unread. Oracle: an `m.read` receipt is sent as the user's double-puppet
+/// (bearer = puppet token) for the just-bridged event. Without the first-bridge
+/// mirror this receipt is never sent (Email/changes never re-surfaces unchanged
+/// history), so the test fails on the old code.
+#[tokio::test]
+async fn test_seen_email_gets_read_receipt_on_first_bridge() {
+    const PUPPET_TOKEN: &str = "puppet-tok-seen";
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+             "username": "user",
+             "accounts": {},
+             "primaryAccounts": {},
+             "apiUrl": format!("{}/api", mock_server.uri()),
+             "downloadUrl": "http://127.0.0.1/download",
+             "uploadUrl": "http://127.0.0.1/upload",
+             "eventSourceUrl": "http://127.0.0.1/events",
+             "capabilities": {
+                "urn:ietf:params:jmap:core": {},
+                "urn:ietf:params:jmap:mail": {}
+            },
+             "state": "s1"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(body_string_contains("Mailbox/query"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Mailbox/query", {"accountId": "A123", "ids": [], "queryState": "s1", "canCalculateChanges": false, "position": 0}, "0"]]
+        })))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(body_string_contains("Mailbox/get"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Mailbox/get", {"list": [], "accountId": "A123", "state": "s1", "notFound": []}, "0"]]
+        })))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(body_string_contains("Email/query"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Email/query", {"accountId": "A123", "ids": ["E1"], "queryState": "s1", "canCalculateChanges": false, "position": 0}, "0"]]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // Email/get for the content — note keywords carry $seen (already read).
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(|request: &wiremock::Request| {
+            let json: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let call = json["methodCalls"].as_array().unwrap()[0]
+                .as_array()
+                .unwrap();
+            call[0].as_str().unwrap() == "Email/get"
+                && call[1]["ids"].as_array().is_some_and(|ids| !ids.is_empty())
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Email/get", {
+                "accountId": "A123",
+                "state": "s1",
+                "notFound": [],
+                "list": [{
+                    "id": "E1",
+                    "threadId": "T1",
+                    "subject": "Already read",
+                    "keywords": {"$seen": true},
+                    "from": [{"name": "Alice", "email": "alice@example.com"}],
+                    "to": [{"email": "user@example.com"}],
+                    "receivedAt": "2026-01-01T00:00:00Z",
+                    "textBody": [{"partId": "b1", "type": "text/plain"}],
+                    "bodyValues": {"b1": {"value": "Seen mail body"}}
+                }]
+            }, "0"]]
+        })))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(body_string_contains("Email/get"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Email/get", {"list": [], "accountId": "A123", "state": "s1", "notFound": []}, "0"]]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("POST"))
+        .and(path("/_matrix/client/v3/register"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/_matrix/client/v3/createRoom"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "room_id": "!room1:localhost"
+        })))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path_regex(r".*/rooms/.*/join"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "room_id": "!room1:localhost"
+        })))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path_regex(r".*/state/.*"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "event_id": "$st" })),
+        )
+        .mount(&mock_server)
+        .await;
+    // The email message; returns the event id the read receipt must target.
+    Mock::given(method("PUT"))
+        .and(body_string_contains("Seen mail body"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "event_id": "$msg1" })),
+        )
+        .mount(&mock_server)
+        .await;
+    // THE ORACLE endpoint: an m.read receipt for the bridged event.
+    Mock::given(method("POST"))
+        .and(path_regex(r".*/receipt/m\.read/.*"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let store = Store::new_in_memory(None).await.unwrap();
+    store
+        .save_user(&jmap_matrix_bridge::store::RegisteredUser {
+            matrix_user_id: "@user:localhost".to_string(),
+            jmap_username: "user".to_string(),
+            jmap_token: "secret".to_string(),
+            jmap_url: mock_server.uri(),
+        })
+        .await
+        .unwrap();
+    store
+        .set_matrix_puppet_token("@user:localhost", PUPPET_TOKEN)
+        .await
+        .unwrap();
+
+    let matrix = MatrixClient::new(&mock_server.uri(), "token", "localhost")
+        .await
+        .unwrap();
+    let client = jmap_client::client::Client::new()
+        .credentials(jmap_client::client::Credentials::Basic(
+            "dXNlcjpwYXNz".to_string(),
+        ))
+        .connect(&mock_server.uri())
+        .await
+        .unwrap();
+    let poller = JmapPoller::new(
+        "@user:localhost".to_string(),
+        Arc::new(client),
+        matrix,
+        store.clone(),
+        10,
+        true,
+        jmap_matrix_bridge::services::content::RenderMode::default(),
+    );
+
+    poller.poll().await.expect("poll should succeed");
+
+    // The receipt must target the bridged event and carry the puppet token.
+    let reqs = mock_server.received_requests().await.unwrap();
+    let receipt = reqs.iter().find(|r| {
+        r.url.path().contains("/receipt/m.read/")
+            && r.headers
+                .get("authorization")
+                .is_some_and(|v| v.to_str().unwrap_or("") == format!("Bearer {PUPPET_TOKEN}"))
+    });
+    let receipt = receipt.expect("a $seen email must get an m.read receipt on first bridge");
+    assert!(
+        receipt.url.path().contains("!room1:localhost"),
+        "receipt must target the bridged room, got {}",
+        receipt.url.path()
+    );
+}
+
 /// Reverse read-state (direction B): an already-bridged email that was mirrored
 /// read, then loses `$seen` in the mailbox (marked unread in another client),
 /// must flag its room `m.marked_unread` in Matrix. Driven through the
