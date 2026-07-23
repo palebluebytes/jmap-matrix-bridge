@@ -58,6 +58,25 @@ pub async fn create_contact_room(
         .await?;
     let _ = matrix.join_room_as(&room_id, &ghost_user_id).await;
 
+    // Join the REAL user synchronously (double-puppet) BEFORE any message is
+    // posted into this room. The appservice can only invite; if the join is left
+    // to the async /sync auto-accept loop (puppet.rs), the first email lands while
+    // the user is merely invited, so Matrix files it as pre-join history (never
+    // unread) and the later join becomes the room's newest event ("… joined the
+    // room" as the last message). Joining first makes the email the latest event
+    // AND counts it as unread. Best-effort: with no stored puppet token we fall
+    // back to the async auto-accept loop (unconfigured double-puppet).
+    if let Ok(Some(token)) = store.get_matrix_puppet_token(matrix_user_id).await {
+        if let Err(e) =
+            crate::puppet::join_room_via_token(&matrix.homeserver_url, &token, &room_id).await
+        {
+            warn!(
+                error = %e, %matrix_user_id,
+                "Failed to pre-join real user to contact room; relying on async auto-accept"
+            );
+        }
+    }
+
     // Group the new conversation under the user's "email <address>" space.
     // Best-effort: a space failure must not fail room provisioning.
     if let Err(e) = ensure_room_in_email_space(matrix, store, matrix_user_id, &room_id).await {

@@ -10,7 +10,7 @@ use jmap_matrix_bridge::ingest::JmapPoller;
 use jmap_matrix_bridge::matrix::MatrixClient;
 use jmap_matrix_bridge::store::Store;
 use std::sync::Arc;
-use wiremock::matchers::{body_string_contains, header, method, path};
+use wiremock::matchers::{body_string_contains, header, method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
@@ -742,5 +742,209 @@ async fn test_poll_handles_attachments() {
     assert!(
         result.is_ok(),
         "poll() should succeed when handling attachments"
+    );
+}
+
+/// Regression for the "new email shows as already read / last message is
+/// '<user> joined the room'" bug. Both symptoms come from the real user joining
+/// the room AFTER the email is posted: the message is then pre-join history (not
+/// unread) and the join is the newest event. The fix pre-joins the real user via
+/// their double-puppet token, synchronously, before the first message is sent —
+/// so here the puppet `/join` MUST reach Matrix before the message PUT.
+#[tokio::test]
+async fn test_new_thread_joins_real_user_before_posting_message() {
+    const PUPPET_TOKEN: &str = "puppet-tok-123";
+    let mock_server = MockServer::start().await;
+
+    // JMAP session discovery.
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+             "username": "user",
+             "accounts": {},
+             "primaryAccounts": {},
+             "apiUrl": format!("{}/api", mock_server.uri()),
+             "downloadUrl": "http://127.0.0.1/download",
+             "uploadUrl": "http://127.0.0.1/upload",
+             "eventSourceUrl": "http://127.0.0.1/events",
+             "capabilities": {
+                "urn:ietf:params:jmap:core": {},
+                "urn:ietf:params:jmap:mail": {}
+            },
+             "state": "s1"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // Mailbox/query (sync_mailboxes runs first) -> no mailboxes.
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(body_string_contains("Mailbox/query"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Mailbox/query", {"accountId": "A123", "ids": [], "queryState": "s1", "canCalculateChanges": false, "position": 0}, "0"]]
+        })))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(body_string_contains("Mailbox/get"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Mailbox/get", {"list": [], "accountId": "A123", "state": "s1", "notFound": []}, "0"]]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // Email/query returns one email id.
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(body_string_contains("Email/query"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Email/query", {"accountId": "A123", "ids": ["E1"], "queryState": "s1", "canCalculateChanges": false, "position": 0}, "0"]]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // Email/get that fetches the email content (ids non-empty).
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(|request: &wiremock::Request| {
+            let json: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let call = json["methodCalls"].as_array().unwrap()[0]
+                .as_array()
+                .unwrap();
+            call[0].as_str().unwrap() == "Email/get"
+                && call[1]["ids"].as_array().is_some_and(|ids| !ids.is_empty())
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Email/get", {
+                "accountId": "A123",
+                "state": "s1",
+                "notFound": [],
+                "list": [{
+                    "id": "E1",
+                    "threadId": "T1",
+                    "subject": "Hello from Alice",
+                    "from": [{"name": "Alice", "email": "alice@example.com"}],
+                    "to": [{"email": "user@example.com"}],
+                    "receivedAt": "2026-01-01T00:00:00Z",
+                    "textBody": [{"partId": "b1", "type": "text/plain"}],
+                    "bodyValues": {"b1": {"value": "Hello world from Alice"}}
+                }]
+            }, "0"]]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // Email/get state bootstrap (ids: []).
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(body_string_contains("Email/get"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Email/get", {"list": [], "accountId": "A123", "state": "s1", "notFound": []}, "0"]]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // Ghost registration + room creation.
+    Mock::given(method("POST"))
+        .and(path("/_matrix/client/v3/register"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/_matrix/client/v3/createRoom"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "room_id": "!room1:localhost"
+        })))
+        .mount(&mock_server)
+        .await;
+    // Any /join (ghost's appservice join AND the puppet's real-user join).
+    Mock::given(method("POST"))
+        .and(path("/_matrix/client/v3/rooms/!room1:localhost/join"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "room_id": "!room1:localhost"
+        })))
+        .mount(&mock_server)
+        .await;
+    // Room name/topic/space state events.
+    Mock::given(method("PUT"))
+        .and(path_regex(r".*/state/.*"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "event_id": "$st" })),
+        )
+        .mount(&mock_server)
+        .await;
+    // The email message itself.
+    Mock::given(method("PUT"))
+        .and(body_string_contains("Hello world from Alice"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "event_id": "$msg1" })),
+        )
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let store = Store::new_in_memory(None).await.unwrap();
+    store
+        .save_user(&jmap_matrix_bridge::store::RegisteredUser {
+            matrix_user_id: "@user:localhost".to_string(),
+            jmap_username: "user".to_string(),
+            jmap_token: "secret".to_string(),
+            jmap_url: mock_server.uri(),
+        })
+        .await
+        .unwrap();
+    // Stored double-puppet token: the pre-join path only fires when one exists.
+    store
+        .set_matrix_puppet_token("@user:localhost", PUPPET_TOKEN)
+        .await
+        .unwrap();
+
+    let matrix = MatrixClient::new(&mock_server.uri(), "token", "localhost")
+        .await
+        .unwrap();
+    let client = jmap_client::client::Client::new()
+        .credentials(jmap_client::client::Credentials::Basic(
+            "dXNlcjpwYXNz".to_string(),
+        ))
+        .connect(&mock_server.uri())
+        .await
+        .unwrap();
+    let poller = JmapPoller::new(
+        "@user:localhost".to_string(),
+        Arc::new(client),
+        matrix,
+        store.clone(),
+        10,
+        true,
+        jmap_matrix_bridge::services::content::RenderMode::default(),
+    );
+
+    poller.poll().await.expect("poll should succeed");
+
+    // ORACLE: the real user's puppet join (bearer = PUPPET_TOKEN) must be recorded
+    // BEFORE the message PUT. Under the old code the real user never joins in-band,
+    // so the puppet join is absent entirely and this fails.
+    let reqs = mock_server.received_requests().await.unwrap();
+    let puppet_join_idx = reqs.iter().position(|r| {
+        r.url.path() == "/_matrix/client/v3/rooms/!room1:localhost/join"
+            && r.headers
+                .get("authorization")
+                .is_some_and(|v| v.to_str().unwrap_or("") == format!("Bearer {PUPPET_TOKEN}"))
+    });
+    let message_idx = reqs
+        .iter()
+        .position(|r| String::from_utf8_lossy(&r.body).contains("Hello world from Alice"));
+
+    let puppet_join_idx =
+        puppet_join_idx.expect("real user must be pre-joined via the puppet token");
+    let message_idx = message_idx.expect("the email message must be posted");
+    assert!(
+        puppet_join_idx < message_idx,
+        "real user must join (req #{puppet_join_idx}) before the email is posted (req #{message_idx})"
     );
 }

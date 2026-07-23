@@ -231,6 +231,29 @@ async fn join_room(
     }
 }
 
+/// Join `room_id` as the user owning `token`, erroring on any non-2xx.
+///
+/// The fire-and-forget [`join_room`] above serves the async `/sync` auto-accept
+/// loop; this variant is for callers that must confirm the real user is a member
+/// *synchronously* — specifically, before the bridge posts the first email into a
+/// freshly created room. If the join is left to the async loop, the message lands
+/// while the user is merely invited: Matrix then treats it as pre-join history
+/// (never counted as unread) and the later join becomes the newest event in the
+/// room, so "… joined the room" shows as the last message. Joining first makes
+/// the email both the latest event and unread.
+pub async fn join_room_via_token(homeserver: &str, token: &str, room_id: &str) -> Result<()> {
+    let url = format!("{homeserver}/_matrix/client/v3/rooms/{room_id}/join");
+    let resp = crate::net::client_with_timeouts()
+        .post(&url)
+        .bearer_auth(token)
+        .json(&serde_json::json!({}))
+        .send()
+        .await?;
+    let status = resp.status();
+    anyhow::ensure!(status.is_success(), "join of {room_id} failed ({status})");
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{invited_by, localpart};
