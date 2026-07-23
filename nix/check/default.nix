@@ -239,6 +239,54 @@ pkgs.testers.nixosTest {
         return ("curl -sS " + AUTH + " -X POST " + JMAP + "/jmap " + HDR
                 + " -d " + json_arg(body))
 
+    # ════════════════════════════════════════════════════════════════════════════
+    # REAL-STACK ASSUMPTION CHECK: does this homeserver deliver m.marked_unread
+    # (MSC2867) ROOM account data via /sync? The bridge's unread reflection depends
+    # on it end-to-end — direction A reads the flag from the user's /sync (puppet
+    # loop), direction B writes it. wiremock can't prove the homeserver's own
+    # behaviour, so assert it here against the real homeserver, masquerading as an
+    # appservice-namespace user via the as_token (no open registration needed).
+    # ════════════════════════════════════════════════════════════════════════════
+    import time
+    HS = "http://127.0.0.1:${toString hsPort}"
+    ASTOK = "Authorization: Bearer secret_as_token"
+    probe_user = "@_jmap_probe:localhost"
+    probe_q = urllib.parse.quote(probe_user)
+
+    def cs(path, method="GET", body=None, masquerade=True):
+        sep = "&" if "?" in path else "?"
+        url = HS + path + ((sep + "user_id=" + probe_q) if masquerade else "")
+        cmd = "curl -sS -X " + method + " -H '" + ASTOK + "' '" + url + "'"
+        if body is not None:
+            cmd += " -H 'Content-Type: application/json' -d " + json_arg(json.dumps(body))
+        return machine.succeed(cmd)
+
+    # Register the probe user in the appservice's exclusive namespace, then act as
+    # it. (Ignore an already-registered error on a rerun.)
+    machine.execute(
+        "curl -sS -X POST -H '" + ASTOK + "' '" + HS + "/_matrix/client/v3/register' "
+        "-H 'Content-Type: application/json' -d " + json_arg(json.dumps(
+            {"type": "m.login.application_service", "username": "_jmap_probe"})))
+    room = json.loads(cs("/_matrix/client/v3/createRoom", "POST", {}))["room_id"]
+    since = json.loads(cs("/_matrix/client/v3/sync?timeout=0"))["next_batch"]
+    cs("/_matrix/client/v3/user/" + probe_q + "/rooms/" + urllib.parse.quote(room)
+       + "/account_data/m.marked_unread", "PUT", {"unread": True})
+
+    delivered = False
+    for _ in range(15):
+        s = json.loads(cs("/_matrix/client/v3/sync?timeout=1000&since=" + urllib.parse.quote(since)))
+        events = (s.get("rooms", {}).get("join", {}).get(room, {})
+                   .get("account_data", {}).get("events", []))
+        if any(e.get("type") == "m.marked_unread"
+               and e.get("content", {}).get("unread") is True for e in events):
+            delivered = True
+            break
+        since = s.get("next_batch", since)
+        time.sleep(1)
+    assert delivered, "m.marked_unread was NOT delivered via /sync on ${homeserver}"
+    print("REAL-STACK OK: ${homeserver} round-trips m.marked_unread via /sync "
+          "(bridge unread reflection is viable on this homeserver)")
+
     # ── Create a real mail account (fallback-admin has no JMAP mailbox) ──────────
     machine.wait_for_open_port(8082, timeout=30)
     print("=== create domain ===")
