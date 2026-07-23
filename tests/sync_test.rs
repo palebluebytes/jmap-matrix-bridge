@@ -8,7 +8,7 @@
 
 use jmap_matrix_bridge::ingest::JmapPoller;
 use jmap_matrix_bridge::matrix::MatrixClient;
-use jmap_matrix_bridge::store::Store;
+use jmap_matrix_bridge::store::{Store, ThreadRepository};
 use std::sync::Arc;
 use wiremock::matchers::{body_string_contains, header, method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -947,4 +947,147 @@ async fn test_new_thread_joins_real_user_before_posting_message() {
         puppet_join_idx < message_idx,
         "real user must join (req #{puppet_join_idx}) before the email is posted (req #{message_idx})"
     );
+}
+
+/// Reverse read-state (direction B): an already-bridged email that was mirrored
+/// read, then loses `$seen` in the mailbox (marked unread in another client),
+/// must flag its room `m.marked_unread` in Matrix. Driven through the
+/// `Email/changes` path with the email pre-mapped and the read gate pre-set, so
+/// `process_email` takes the already-mapped branch into `sync_read_state`.
+/// Oracle: a PUT of `m.marked_unread` `{unread:true}` as the puppet. Absent on
+/// the old code (which only mirrored the seen direction), so it fails without B.
+#[tokio::test]
+async fn test_email_losing_seen_marks_room_unread_in_matrix() {
+    const PUPPET_TOKEN: &str = "puppet-tok-unread";
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+             "username": "user",
+             "accounts": {},
+             "primaryAccounts": {},
+             "apiUrl": format!("{}/api", mock_server.uri()),
+             "downloadUrl": "http://127.0.0.1/download",
+             "uploadUrl": "http://127.0.0.1/upload",
+             "eventSourceUrl": "http://127.0.0.1/events",
+             "capabilities": { "urn:ietf:params:jmap:core": {}, "urn:ietf:params:jmap:mail": {} },
+             "state": "s1"
+        })))
+        .mount(&mock_server)
+        .await;
+    // sync_mailboxes (runs first) -> no mailboxes.
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(body_string_contains("Mailbox/query"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Mailbox/query", {"accountId": "A123", "ids": [], "queryState": "s1", "canCalculateChanges": false, "position": 0}, "0"]]
+        })))
+        .mount(&mock_server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(body_string_contains("Mailbox/get"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Mailbox/get", {"list": [], "accountId": "A123", "state": "s1", "notFound": []}, "0"]]
+        })))
+        .mount(&mock_server)
+        .await;
+    // Email/changes reports E1 updated (its $seen was just cleared).
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(body_string_contains("Email/changes"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Email/changes", {
+                "accountId": "A123", "oldState": "state0", "newState": "state1",
+                "hasMoreChanges": false, "created": [], "updated": ["E1"], "destroyed": []
+            }, "0"]]
+        })))
+        .mount(&mock_server)
+        .await;
+    // Email/get for E1 — keywords now EMPTY (no $seen).
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(body_string_contains("Email/get"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Email/get", {
+                "accountId": "A123", "state": "state1", "notFound": [],
+                "list": [{
+                    "id": "E1", "threadId": "T1", "subject": "Was read",
+                    "keywords": {},
+                    "from": [{"email": "alice@example.com"}],
+                    "receivedAt": "2026-01-01T00:00:00Z"
+                }]
+            }, "0"]]
+        })))
+        .mount(&mock_server)
+        .await;
+    // THE ORACLE: m.marked_unread set true for the room, as the puppet.
+    Mock::given(method("PUT"))
+        .and(path_regex(r".*/account_data/m\.marked_unread$"))
+        .and(header("authorization", &*format!("Bearer {PUPPET_TOKEN}")))
+        .and(body_string_contains("\"unread\":true"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let store = Store::new_in_memory(None).await.unwrap();
+    store
+        .save_user(&jmap_matrix_bridge::store::RegisteredUser {
+            matrix_user_id: "@user:localhost".to_string(),
+            jmap_username: "user".to_string(),
+            jmap_token: "secret".to_string(),
+            jmap_url: mock_server.uri(),
+        })
+        .await
+        .unwrap();
+    store
+        .set_matrix_puppet_token("@user:localhost", PUPPET_TOKEN)
+        .await
+        .unwrap();
+    // E1 is already bridged into !room1, and we previously mirrored it as read.
+    store
+        .save_thread_mapping_atomic("T1", "$evt:localhost", "!room1:localhost", "Was read")
+        .await
+        .unwrap();
+    store
+        .save_message_mapping("E1", "$evt:localhost")
+        .await
+        .unwrap();
+    store
+        .save_jmap_state("@user:localhost", "read_synced:E1", "1")
+        .await
+        .unwrap();
+    // Put the poller on the Email/changes path (not the initial query).
+    store
+        .save_jmap_state("@user:localhost", "changes", "state0")
+        .await
+        .unwrap();
+
+    let matrix = MatrixClient::new(&mock_server.uri(), "token", "localhost")
+        .await
+        .unwrap();
+    let client = jmap_client::client::Client::new()
+        .credentials(jmap_client::client::Credentials::Basic(
+            "dXNlcjpwYXNz".to_string(),
+        ))
+        .connect(&mock_server.uri())
+        .await
+        .unwrap();
+    let poller = JmapPoller::new(
+        "@user:localhost".to_string(),
+        Arc::new(client),
+        matrix,
+        store.clone(),
+        10,
+        true,
+        jmap_matrix_bridge::services::content::RenderMode::default(),
+    );
+
+    poller.poll().await.expect("poll should succeed");
+    // Mock `.expect(1)` verifies the marked_unread PUT landed on drop.
 }

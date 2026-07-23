@@ -1068,4 +1068,44 @@ impl MatrixClient {
         );
         Ok(())
     }
+
+    /// Set the `m.marked_unread` (MSC2867) room account data for `user_id`,
+    /// authenticated as that user's double-puppet — the Matrix reflection of a
+    /// mail becoming unread/read in the client. Writing `unread: false` clears the
+    /// flag (what Element does on read), so this one call covers both edges.
+    pub async fn set_marked_unread(
+        &self,
+        user_id: &str,
+        room_id: &str,
+        unread: bool,
+        access_token: &str,
+    ) -> Result<()> {
+        let mut url = reqwest::Url::parse(&self.homeserver_url)?;
+        url.path_segments_mut()
+            .map_err(|()| anyhow::anyhow!("homeserver URL cannot be a base"))?
+            .extend(&[
+                "_matrix",
+                "client",
+                "v3",
+                "user",
+                user_id,
+                "rooms",
+                room_id,
+                "account_data",
+                "m.marked_unread",
+            ]);
+        let resp = self
+            .http_client
+            .put(url)
+            .bearer_auth(access_token)
+            .json(&serde_json::json!({ "unread": unread }))
+            .send()
+            .await?;
+        anyhow::ensure!(
+            resp.status().is_success(),
+            "set marked_unread failed: {}",
+            resp.status()
+        );
+        Ok(())
+    }
 }
