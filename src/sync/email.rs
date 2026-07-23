@@ -220,6 +220,10 @@ impl JmapPoller {
             Property::HtmlBody,
             Property::BodyValues,
             Property::Attachments,
+            // Required by sync_read_state (read/unread mirroring): a real JMAP
+            // server only returns keywords when asked, so without this
+            // `email.keywords()` is always empty and $seen is never observed.
+            Property::Keywords,
         ]);
         email_req
             .arguments()
