@@ -22,6 +22,7 @@ let
     as_token: secret_as_token
     hs_token: secret_hs_token
     sender_localpart: _jmap_bot
+    receive_ephemeral: true
     namespaces:
       users:
       - exclusive: true
@@ -54,7 +55,10 @@ pkgs.testers.nixosTest {
                 port = [ hsPort ];
                 appservice_dir = "/etc/tuwunel/appservices/";
                 allow_federation = false;
-                allow_registration = false;
+                # Open registration behind a shared token so the testScript can
+                # create the real Matrix account the bridge double-puppets.
+                allow_registration = true;
+                registration_token = "test_reg_token";
               };
             };
             environment.etc."tuwunel/appservices/jmap-registration.yaml".text = registrationYaml;
@@ -119,17 +123,32 @@ pkgs.testers.nixosTest {
             # loopback matrixUrl). The assertions expect @_jmap_…:localhost ghosts.
             matrixDomain = "localhost";
             encryptionKeyFile = "/etc/jmap-bridge-key";
-            extraArgs = [
-              "--jmap-username"
-              "bridgeuser"
+            # Declarative double-puppet: the bridge logs in as @admin:localhost
+            # (registered by the testScript) to run the auto-accept + marked_unread
+            # /sync loop, and reflects read/unread both ways. jmapUsername stays
+            # bridgeuser; the JMAP token comes from tokenFile.
+            users = [
+              {
+                matrixId = "@admin:localhost";
+                jmapUsername = "bridgeuser";
+                tokenFile = "/etc/jmap-bridgepass";
+                matrixPasswordFile = "/etc/jmap-admin-matrix-pw";
+              }
             ];
             environmentFile = pkgs.writeText "jmap-bridge-env" ''
               MATRIX_AS_TOKEN=secret_as_token
               MATRIX_HS_TOKEN=secret_hs_token
-              JMAP_TOKEN=bridgepass
               RUST_LOG=info
             '';
           };
+
+          # Bridge credential files (absolute, non-store paths as the module
+          # asserts). The bridge's JMAP token and @admin's Matrix password.
+          system.activationScripts.jmap-bridge-creds = ''
+            echo -n "bridgepass" > /etc/jmap-bridgepass
+            echo -n "adminpass"  > /etc/jmap-admin-matrix-pw
+            chmod 0600 /etc/jmap-bridgepass /etc/jmap-admin-matrix-pw
+          '';
 
           # Tools used by the round-trip test assertions.
           environment.systemPackages = [
@@ -286,6 +305,22 @@ pkgs.testers.nixosTest {
     assert delivered, "m.marked_unread was NOT delivered via /sync on ${homeserver}"
     print("REAL-STACK OK: ${homeserver} round-trips m.marked_unread via /sync "
           "(bridge unread reflection is viable on this homeserver)")
+
+    # ── Register the real Matrix account the bridge double-puppets (@admin) ──────
+    # Two-step registration_token UIA, exactly like the production register-admin
+    # unit. Must exist BEFORE the bridge starts so its double-puppet login works.
+    ADMIN_PW = "adminpass"
+    reg = {"username": "admin", "password": ADMIN_PW, "inhibit_login": True}
+    sess = json.loads(machine.succeed(
+        "curl -sS -X POST '" + HS + "/_matrix/client/v3/register' "
+        "-H 'Content-Type: application/json' -d " + json_arg(json.dumps(reg)))).get("session")
+    if sess:
+        reg["auth"] = {"type": "m.login.registration_token", "token": "test_reg_token", "session": sess}
+        machine.succeed(
+            "curl -sS -X POST '" + HS + "/_matrix/client/v3/register' "
+            "-H 'Content-Type: application/json' -d " + json_arg(json.dumps(reg))
+            + " | tee /dev/stderr | jq -e -r '.user_id'")
+    print("registered @admin:localhost for double-puppet")
 
     # ── Create a real mail account (fallback-admin has no JMAP mailbox) ──────────
     machine.wait_for_open_port(8082, timeout=30)
@@ -642,6 +677,124 @@ pkgs.testers.nixosTest {
     finally:
         print("=== BRIDGE LOGS (after threading) ===")
         print(machine.execute("journalctl -u jmap-bridge")[1])
+        print("===================")
+
+    # ════════════════════════════════════════════════════════════════════════════
+    # READ/UNREAD: full end-to-end, both directions, through the REAL double-puppet
+    # (@admin) on real tuwunel + Stalwart. Proves the three transitions the unit
+    # tests could only mock: outbound read (needs the ephemeral flag), direction A
+    # (Element mark-unread -> JMAP $seen cleared), direction B (JMAP unread ->
+    # Matrix m.marked_unread).
+    # ════════════════════════════════════════════════════════════════════════════
+    try:
+        admin_tok = json.loads(machine.succeed(
+            "curl -sS -X POST '" + HS + "/_matrix/client/v3/login' "
+            "-H 'Content-Type: application/json' -d " + json_arg(json.dumps({
+                "type": "m.login.password",
+                "identifier": {"type": "m.id.user", "user": "admin"},
+                "password": ADMIN_PW}))))["access_token"]
+        admin_q = "%40admin%3Alocalhost"
+
+        def poll_until(cond, msg, tries=40, delay=1):
+            for _ in range(tries):
+                if cond():
+                    return
+                time.sleep(delay)
+            raise AssertionError(msg)
+
+        def inject(sender, subj):
+            # Inject a fresh single-email thread; return (email_id, room_id).
+            eid = machine.succeed(jmap(["Email/set", {"accountId": account_id, "create": {"c1": {
+                "mailboxIds": {inbox_id: True}, "keywords": {"$seen": False},
+                "from": [{"email": sender}], "to": [{"email": "bridgeuser@example.com"}],
+                "subject": subj, "bodyStructure": {"type": "text/plain", "partId": "p"},
+                "bodyValues": {"p": {"value": subj + " body"}}}}}, "0"])
+                + " | jq -e -r '.methodResponses[0][1].created.c1.id'").strip()
+            machine.wait_until_succeeds(
+                "sqlite3 " + DB + " \"SELECT COUNT(*) FROM room_ghost_mapping "
+                "WHERE ghost_email='" + sender + "';\" | grep -q '^1$'", timeout=60)
+            rid = machine.succeed(
+                "sqlite3 " + DB + " \"SELECT matrix_room_id FROM room_ghost_mapping "
+                "WHERE ghost_email='" + sender + "' LIMIT 1;\"").strip()
+            # Ensure the puppet has joined so it can act in the room.
+            machine.execute("curl -sS -X POST -H 'Authorization: Bearer " + admin_tok + "' '"
+                + HS + "/_matrix/client/v3/rooms/" + urllib.parse.quote(rid, safe="")
+                + "/join' -H 'Content-Type: application/json' -d '{}'")
+            return eid, rid
+
+        def seen(eid):
+            return machine.succeed(jmap(["Email/get", {"accountId": account_id,
+                "ids": [eid], "properties": ["keywords"]}, "0"])
+                + " | jq -r '.methodResponses[0][1].list[0].keywords[\"$seen\"] // false'"
+                ).strip() == "true"
+
+        def set_seen(eid, val):
+            kw = {"$seen": True} if val else {}
+            machine.succeed(jmap(["Email/set", {"accountId": account_id,
+                "update": {eid: {"keywords": kw}}}, "0"])
+                + " | jq -e '.methodResponses[0][1].updated'")
+
+        def read_gate(eid):
+            # The bridge's per-email read-sync gate — set only by sync_read_state's
+            # read edge, so waiting on it synchronizes with the poll path.
+            return machine.succeed("sqlite3 " + DB + " \"SELECT COUNT(*) FROM jmap_state "
+                "WHERE state_key='read_synced:" + eid + "';\"").strip() != "0"
+
+        def marked_unread(rid):
+            return machine.execute("curl -sS -H 'Authorization: Bearer " + admin_tok + "' '"
+                + HS + "/_matrix/client/v3/user/" + admin_q + "/rooms/"
+                + urllib.parse.quote(rid, safe="") + "/account_data/m.marked_unread' "
+                "| jq -r '.unread // false'")[1].strip() == "true"
+
+        def put_marked_unread(rid, val):
+            machine.succeed("curl -sS -X PUT -H 'Authorization: Bearer " + admin_tok + "' '"
+                + HS + "/_matrix/client/v3/user/" + admin_q + "/rooms/"
+                + urllib.parse.quote(rid, safe="") + "/account_data/m.marked_unread' "
+                "-H 'Content-Type: application/json' -d '" + json.dumps({"unread": val}) + "'")
+
+        def send_read_receipt(rid, eid):
+            ev = machine.succeed("sqlite3 " + DB + " \"SELECT matrix_event_id FROM message_mapping "
+                "WHERE jmap_email_id='" + eid + "';\"").strip()
+            machine.succeed("curl -sS -X POST -H 'Authorization: Bearer " + admin_tok + "' '"
+                + HS + "/_matrix/client/v3/rooms/" + urllib.parse.quote(rid, safe="")
+                + "/receipt/m.read/" + urllib.parse.quote(ev, safe="")
+                + "' -H 'Content-Type: application/json' -d '{}'")
+
+        # Two fresh single-email threads with clean read-state: one for read + A,
+        # one for B (each direction on its own email, so no gate cross-talk).
+        bob_e, bob_r = inject("bob@example.com", "Read probe")
+        dave_e, dave_r = inject("dave@example.com", "Unread probe")
+
+        # ── Outbound read (needs the ephemeral flag) + confirm the poll records it ─
+        poll_until(lambda: not seen(bob_e), "precondition: bob email starts unseen")
+        send_read_receipt(bob_r, bob_e)
+        poll_until(lambda: seen(bob_e),
+                   "OUTBOUND READ: @admin's m.read receipt must set $seen in JMAP "
+                   "(the path that needs receive_ephemeral in the registration)")
+        poll_until(lambda: read_gate(bob_e),
+                   "OUTBOUND READ: the poll must run sync_read_state and record the read")
+        print("OUTBOUND READ e2e OK: Matrix read receipt -> JMAP $seen (+ read gate set)")
+
+        # ── Direction A: Element mark-unread -> JMAP $seen cleared ($seen is true) ─
+        put_marked_unread(bob_r, True)
+        poll_until(lambda: not seen(bob_e),
+                   "DIRECTION A: marking the room unread must clear $seen in JMAP")
+        print("DIRECTION A e2e OK: Element m.marked_unread -> JMAP $seen cleared")
+
+        # ── Direction B: JMAP unread -> Matrix m.marked_unread (clean dave email) ──
+        set_seen(dave_e, True)
+        poll_until(lambda: seen(dave_e), "B setup: dave $seen set")
+        poll_until(lambda: read_gate(dave_e),
+                   "B setup: the poll must record the read (so B's edge can fire)")
+        poll_until(lambda: not marked_unread(dave_r), "B setup: dave room not yet unread")
+        set_seen(dave_e, False)
+        poll_until(lambda: marked_unread(dave_r),
+                   "DIRECTION B: clearing $seen in JMAP must set m.marked_unread in Matrix")
+        print("DIRECTION B e2e OK: JMAP $seen cleared -> Matrix m.marked_unread")
+        print("READ/UNREAD full round-trip verified on real tuwunel + Stalwart")
+    finally:
+        print("=== BRIDGE LOGS (after read/unread) ===")
+        print(machine.execute("journalctl -u jmap-bridge | tail -n 120")[1])
         print("===================")
   '';
 }
