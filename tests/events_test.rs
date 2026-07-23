@@ -1012,8 +1012,14 @@ async fn read_receipt_marks_jmap_email_seen() {
     // Keep the background poller quiet (it reads, never writes $seen).
     for m in ["Mailbox/query", "Mailbox/get", "Email/query", "Email/get"] {
         let (rname, extra) = match m {
-            "Mailbox/query" | "Email/query" => (m, serde_json::json!({"accountId":"A123","ids":[],"queryState":"s1","canCalculateChanges":false,"position":0})),
-            _ => (m, serde_json::json!({"accountId":"A123","state":"s1","list":[],"notFound":[]})),
+            "Mailbox/query" | "Email/query" => (
+                m,
+                serde_json::json!({"accountId":"A123","ids":[],"queryState":"s1","canCalculateChanges":false,"position":0}),
+            ),
+            _ => (
+                m,
+                serde_json::json!({"accountId":"A123","state":"s1","list":[],"notFound":[]}),
+            ),
         };
         Mock::given(method("POST"))
             .and(path("/api"))
