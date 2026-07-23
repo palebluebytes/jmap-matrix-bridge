@@ -220,6 +220,10 @@ impl JmapPoller {
             Property::HtmlBody,
             Property::BodyValues,
             Property::Attachments,
+            // Required by sync_read_state (read/unread mirroring): a real JMAP
+            // server only returns keywords when asked, so without this
+            // `email.keywords()` is always empty and $seen is never observed.
+            Property::Keywords,
         ]);
         email_req
             .arguments()
@@ -312,38 +316,44 @@ impl JmapPoller {
         result
     }
 
-    /// Mirror a "read elsewhere" JMAP state back to Matrix: when an
-    /// already-bridged email carries `$seen`, emit an `m.read` receipt as the
-    /// user's double-puppet, at most once per email (#27).
+    /// Mirror an already-bridged email's read state from JMAP to Matrix, both
+    /// ways: a `$seen` gained emits an `m.read` receipt (#27); a `$seen` lost on a
+    /// previously-read email flags the room `m.marked_unread` (MSC2867). Both act
+    /// as the user's double-puppet, so without a stored puppet token this is a
+    /// silent no-op (surfaced via `status`).
     ///
-    /// Requires double-puppet — a receipt must originate from the real user, so
-    /// without a stored puppet token this is a silent no-op (surfaced via
-    /// `status`). The once-per-email gate both honours the unseen→seen intent and
-    /// breaks the Matrix-read → `$seen` → `Email/changes` → receipt cycle.
+    /// The single `read_synced` gate makes each edge fire once and breaks the
+    /// Matrix-read → `$seen` → `Email/changes` → receipt cycle (and its unread
+    /// counterpart). Genuinely-new unread mail — never synced read — is left
+    /// alone; it's unread in Element already, so no `marked_unread` is needed.
     async fn sync_read_state(&self, email: &Email) {
         let Some(email_id) = email.id() else {
             return;
         };
-        if !email.keywords().contains(&"$seen") {
-            return;
-        }
+        let seen = email.keywords().contains(&"$seen");
+        // One gate drives a two-edge state machine. `read_synced` means "we have
+        // mirrored this email to Matrix as read". Only the two transitions do
+        // work; the steady states (unseen & not-synced, seen & synced) are no-ops,
+        // which also makes a re-delivery of the same Email/changes idempotent.
+        //   seen  synced_read  -> action
+        //   T     F            -> mirror READ  (receipt; clear any manual unread)
+        //   F     T            -> mirror UNREAD (set m.marked_unread) [#seen→unseen]
+        //   else                -> nothing
         let key = format!("read_synced:{email_id}");
-        if matches!(
+        let synced_read = matches!(
             self.store.get_jmap_state(&self.matrix_user_id, &key).await,
             Ok(Some(_))
-        ) {
+        );
+        if seen == synced_read {
             return;
         }
-        // Requires double-puppet — without a stored token there's nothing we can
-        // do (the appservice can't set the user's read state).
+        // Both edges need the double-puppet token + the room; without a stored
+        // token the appservice can't touch the user's read state at all.
         let Ok(Some(token)) = self
             .store
             .get_matrix_puppet_token(&self.matrix_user_id)
             .await
         else {
-            return;
-        };
-        let Ok(Some(event_id)) = self.store.get_event_id_by_email(email_id).await else {
             return;
         };
         let Some(thread_id) = email.thread_id() else {
@@ -353,19 +363,50 @@ impl JmapPoller {
         else {
             return;
         };
-        if let Err(e) = self
-            .matrix
-            .send_read_receipt(&room_id, &event_id, &token)
-            .await
-        {
-            tracing::warn!(error = %e, %email_id, "Failed to mirror read state to Matrix");
-            return;
+
+        if seen {
+            // unseen→seen in the mail client: emit a read receipt, and clear any
+            // prior manual "mark unread" so the room isn't left stuck unread.
+            let Ok(Some(event_id)) = self.store.get_event_id_by_email(email_id).await else {
+                return;
+            };
+            if let Err(e) = self
+                .matrix
+                .send_read_receipt(&room_id, &event_id, &token)
+                .await
+            {
+                tracing::warn!(error = %e, %email_id, "Failed to mirror read state to Matrix");
+                return;
+            }
+            if let Err(e) = self
+                .matrix
+                .set_marked_unread(&self.matrix_user_id, &room_id, false, &token)
+                .await
+            {
+                tracing::debug!(error = %e, %room_id, "Failed to clear marked_unread on read");
+            }
+            let _ = self
+                .store
+                .save_jmap_state(&self.matrix_user_id, &key, "1")
+                .await;
+            tracing::debug!(%email_id, "Mirrored read state to Matrix via puppet receipt");
+        } else {
+            // seen→unseen in the mail client: flag the room unread in Element via
+            // m.marked_unread, and drop the read gate (which also dedupes this).
+            if let Err(e) = self
+                .matrix
+                .set_marked_unread(&self.matrix_user_id, &room_id, true, &token)
+                .await
+            {
+                tracing::warn!(error = %e, %email_id, "Failed to mirror unread state to Matrix");
+                return;
+            }
+            let _ = self
+                .store
+                .delete_jmap_state(&self.matrix_user_id, &key)
+                .await;
+            tracing::debug!(%email_id, "Mirrored unread state to Matrix via m.marked_unread");
         }
-        let _ = self
-            .store
-            .save_jmap_state(&self.matrix_user_id, &key, "1")
-            .await;
-        tracing::debug!(%email_id, "Mirrored read state to Matrix via puppet receipt");
     }
 
     async fn process_reply(

@@ -249,4 +249,22 @@ impl Store {
             .await
             .map_err(Into::into)
     }
+
+    /// The JMAP email id of a thread room's **latest** bridged message, resolved
+    /// via `thread_mapping.latest_event_id` (kept current on replies) — unlike
+    /// `last_email_id`, which the bridging path never updates. Used to reflect a
+    /// Matrix "mark unread" onto the mail: one unseen email makes the whole thread
+    /// unread, and the newest is the natural target.
+    pub async fn get_latest_email_id_by_room(&self, room_id: &str) -> Result<Option<String>> {
+        sqlx::query_scalar(
+            "SELECT m.jmap_email_id \
+             FROM thread_mapping t \
+             JOIN message_mapping m ON m.matrix_event_id = t.latest_event_id \
+             WHERE t.matrix_room_id = ?",
+        )
+        .bind(room_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(Into::into)
+    }
 }

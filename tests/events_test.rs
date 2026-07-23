@@ -19,7 +19,7 @@ use jmap_matrix_bridge::state::StateStore;
 use jmap_matrix_bridge::store::Store;
 use std::sync::Arc;
 use tower::util::ServiceExt;
-use wiremock::matchers::{method, path, path_regex};
+use wiremock::matchers::{body_string_contains, method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
@@ -980,4 +980,144 @@ async fn test_reply_with_attachment_streaming() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// Outbound read-sync: an Element read receipt (m.read) for a bridged event must
+/// mark the corresponding JMAP email `$seen` (via Email/set). This is the reverse
+/// of the inbound mirror and the direction that was silently dead in production —
+/// the appservice registration didn't request ephemeral EDUs, so the homeserver
+/// never delivered receipts. Oracle: an Email/set adding `$seen` for the mapped
+/// email id is issued when the receipt transaction lands.
+#[tokio::test]
+async fn read_receipt_marks_jmap_email_seen() {
+    let mock_server = MockServer::start().await;
+
+    // JMAP session discovery (mail capability) — needed for login/connect.
+    Mock::given(method("GET"))
+        .and(path("/.well-known/jmap"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "username": "user",
+            "accounts": {},
+            "primaryAccounts": { "urn:ietf:params:jmap:mail": "A123" },
+            "apiUrl": format!("{}/api", mock_server.uri()),
+            "downloadUrl": "http://127.0.0.1/d",
+            "uploadUrl": "http://127.0.0.1/u",
+            "eventSourceUrl": "http://127.0.0.1/e",
+            "capabilities": { "urn:ietf:params:jmap:core": {}, "urn:ietf:params:jmap:mail": {} },
+            "state": "s1"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // Keep the background poller quiet (it reads, never writes $seen).
+    for m in ["Mailbox/query", "Mailbox/get", "Email/query", "Email/get"] {
+        let (rname, extra) = match m {
+            "Mailbox/query" | "Email/query" => (
+                m,
+                serde_json::json!({"accountId":"A123","ids":[],"queryState":"s1","canCalculateChanges":false,"position":0}),
+            ),
+            _ => (
+                m,
+                serde_json::json!({"accountId":"A123","state":"s1","list":[],"notFound":[]}),
+            ),
+        };
+        Mock::given(method("POST"))
+            .and(path("/api"))
+            .and(body_string_contains(m))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sessionState": "s1",
+                "methodResponses": [[rname, extra, "0"]]
+            })))
+            .mount(&mock_server)
+            .await;
+    }
+
+    // THE ORACLE endpoint: Email/set adding $seen for our email.
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(body_string_contains("Email/set"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Email/set", {"accountId": "A123", "updated": {"email-id-123": null}}, "0"]]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let store = Store::new_in_memory(None).await.unwrap();
+    store
+        .save_message_mapping("email-id-123", "$evt:localhost")
+        .await
+        .unwrap();
+
+    let matrix = MatrixClient::new(&mock_server.uri(), "token", "localhost")
+        .await
+        .unwrap();
+    let client_manager = Arc::new(ClientManager::new(store.clone(), matrix, 10));
+    client_manager
+        .login(
+            "@user:localhost".to_string(),
+            "user".to_string(),
+            "secret".to_string(),
+            mock_server.uri(),
+        )
+        .await
+        .unwrap();
+
+    let state = AppState {
+        client_manager,
+        state_store: Arc::new(StateStore::new()),
+        puppet_manager: Arc::new(jmap_matrix_bridge::puppet::PuppetManager::new(
+            String::new(),
+            "@_jmap_bot:localhost".to_string(),
+        )),
+        permissions: Arc::new(jmap_matrix_bridge::permissions::Permissions::allow_all()),
+        double_puppet_secret: None,
+        hs_token: "hs_token".to_string(),
+    };
+    let app = Router::new()
+        .route(
+            "/_matrix/app/v1/transactions/{txn_id}",
+            put(handle_transactions),
+        )
+        .with_state(state);
+
+    // A read receipt from the real user for the bridged event, in `ephemeral`.
+    let json_body = serde_json::json!({
+        "events": [],
+        "ephemeral": [
+            {
+                "type": "m.receipt",
+                "content": {
+                    "$evt:localhost": {
+                        "m.read": { "@user:localhost": { "ts": 1600000000000i64 } }
+                    }
+                }
+            }
+        ]
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/_matrix/app/v1/transactions/txn_receipt")
+                .header("Content-Type", "application/json")
+                .body(Body::from(serde_json::to_string(&json_body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // process_transaction (hence handle_receipt) is awaited inline, so the
+    // Email/set has already been issued by the time the response returns.
+    let reqs = mock_server.received_requests().await.unwrap();
+    let saw_seen = reqs.iter().any(|r| {
+        let b = String::from_utf8_lossy(&r.body);
+        b.contains("Email/set") && b.contains("email-id-123") && b.contains("$seen")
+    });
+    assert!(
+        saw_seen,
+        "a read receipt must trigger an Email/set adding $seen for the mapped email"
+    );
 }
