@@ -163,7 +163,9 @@ async fn create_email_space(
         .get_user_email(matrix_user_id)
         .await?
         .unwrap_or_else(|| user_label(matrix_user_id));
-    let name = format!("email {label}");
+    // The space is named for the address itself (e.g. "thomas@…"); the "email"
+    // context is already carried by the topic and the space's place in the list.
+    let name = label.clone();
     let topic = format!(
         "Bridged email for {label}. Every room in this space is one email conversation, \
          mirrored to and from your mailbox by the JMAP bridge. Reply in a room to answer by \
