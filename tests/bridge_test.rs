@@ -14,7 +14,7 @@ use jmap_matrix_bridge::state::StateStore;
 use jmap_matrix_bridge::store::Store;
 use matrix_sdk::ruma::events::room::message::RoomMessageEventContent;
 use std::sync::Arc;
-use wiremock::matchers::{body_partial_json, method, path};
+use wiremock::matchers::{body_string_contains, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[tokio::test]
@@ -54,21 +54,93 @@ async fn test_full_bridge_cycle() {
         .mount(&mock_server)
         .await;
 
-    // 2. Mock Email/set (sending an email)
+    // 2. Mock the send. `submit` makes three round-trips, each needing a response
+    //    of its own method type — see tests/jmap_mock_test.rs. Mocking only
+    //    Email/set (as this test used to) means the *first* call, Mailbox/query,
+    //    404s and the send fails. That failure is invisible from the outside:
+    //    the `!email` handler deliberately swallows it (src/commands/email.rs) so
+    //    a bad send notifies the user instead of crashing the bridge — which is
+    //    right for production, but means `.unwrap()` on the handler is guaranteed
+    //    to pass and cannot serve as this test's oracle. `.expect(1)` on each mock
+    //    is the oracle: it fails the moment a round-trip stops happening.
+
+    // 2a. Mailbox/query — resolve the Sent mailbox.
     Mock::given(method("POST"))
         .and(path("/api"))
-        .and(body_partial_json(serde_json::json!({
-            "methodCalls": [["Email/set", {"create": {}}, "0"]]
-        })))
+        .and(body_string_contains("Mailbox/query"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "sessionState": "s1",
-            "methodResponses": [["Email/set", {
+            "methodResponses": [["Mailbox/query", {
                 "accountId": "acc1",
-                "oldState": "s1",
-                "newState": "s2",
-                "created": {"new-email": {"id": "email1"}}
+                "queryState": "q1",
+                "canCalculateChanges": false,
+                "position": 0,
+                "ids": ["MB_SENT"]
             }, "0"]]
         })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    // 2b. Identity/get — resolve the From identity. A supporting stub, so no
+    //     `.expect`: it is hit twice (login resolves the identity too — see
+    //     client_manager.rs — then `submit` resolves it again), and pinning that
+    //     count would couple this test to login's internals for no gain. The
+    //     oracles below are what make the test load-bearing.
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(body_string_contains("Identity/get"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Identity/get", {
+                "accountId": "acc1",
+                "state": "i1",
+                "list": [{ "id": "IDENTITY_1", "name": "Test User", "email": "user@example.com" }],
+                "notFound": []
+            }, "0"]]
+        })))
+        .mount(&mock_server)
+        .await;
+
+    // 2c. The batched Email/set + EmailSubmission/set.
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(body_string_contains("Email/set"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [
+                ["Email/set", {
+                    "accountId": "acc1",
+                    "oldState": "s1",
+                    "newState": "s2",
+                    "created": {"draft": {"id": "email1", "blobId": "b1", "threadId": "t1", "size": 42}},
+                    "updated": {}, "destroyed": [],
+                    "notCreated": {}, "notUpdated": {}, "notDestroyed": {}
+                }, "0"],
+                ["EmailSubmission/set", {
+                    "accountId": "acc1",
+                    "oldState": "s1",
+                    "newState": "s2",
+                    "created": {"sub": {"id": "SUB_NEW"}},
+                    "updated": {}, "destroyed": [],
+                    "notCreated": {}, "notUpdated": {}, "notDestroyed": {}
+                }, "1"]
+            ]
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    // 2d. The user-visible outcome. `notify` reports success or failure into the
+    //     room, so pinning the success text asserts what the *user* actually sees:
+    //     a failed send says "Failed to send email: …", which will not match here,
+    //     so `.expect(1)` goes red. This is the assertion the test always wanted.
+    Mock::given(method("PUT"))
+        .and(body_string_contains("Email sent successfully!"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "event_id": "$notify" })),
+        )
+        .expect(1)
         .mount(&mock_server)
         .await;
 
@@ -117,9 +189,10 @@ async fn test_full_bridge_cycle() {
     .await
     .unwrap();
 
-    // 6. Verify Matrix notification (mocked)
-    // In this test, we just check that the command handler finished without error
-    // and the JMAP mock was hit (wiremock handles verification if we used expect).
+    // 6. Verification happens on server drop: every `.expect(1)` above must have
+    //    fired. Together they pin the whole cycle — the send's three JMAP
+    //    round-trips, and the success notification the user sees. The handler's
+    //    `.unwrap()` above proves nothing on its own; these do.
 }
 
 #[tokio::test]

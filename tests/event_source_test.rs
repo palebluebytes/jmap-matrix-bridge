@@ -13,8 +13,19 @@ use std::sync::Arc;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+/// An empty mailbox must bridge nothing: `poll()` succeeds and creates no ghost,
+/// no room, and no message.
+///
+/// This is the negative half of the `if !email_ids.is_empty()` guard in
+/// `sync_emails`; `tests/sync_test.rs` covers the positive half with a real
+/// email. The pairing is deliberate — this test used to return empty lists AND
+/// assert only that `poll()` was `Ok`, which made it a weaker copy of that test
+/// rather than a complement: the Matrix mocks could never fire, so nothing was
+/// asserted in either direction. Pinning them at `.expect(0)` is what makes the
+/// empty case a real property — it now catches eager space/room creation on
+/// every poll.
 #[tokio::test]
-async fn test_poll_with_mock_jmap() {
+async fn test_poll_with_empty_mailbox_bridges_nothing() {
     let mock_server = MockServer::start().await;
 
     // Mock JMAP session discovery
@@ -110,19 +121,35 @@ async fn test_poll_with_mock_jmap() {
         .mount(&mock_server)
         .await;
 
-    // Mock Matrix ensure_user_exists
+    // The Matrix mocks below are NEGATIVE assertions: with an empty mailbox,
+    // nothing should be bridged, so none of them may ever fire. `.expect(0)` is
+    // what states that. Previously they were mounted unpinned and were simply
+    // unreachable — present, never hit, asserting nothing either way.
+
+    // Matrix ensure_user_exists — no ghost should be registered.
     Mock::given(method("POST"))
         .and(path("/_matrix/client/v3/register"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+        .expect(0)
         .mount(&mock_server)
         .await;
 
-    // Mock Matrix createRoom
+    // Matrix createRoom — no space and no contact room should be created.
     Mock::given(method("POST"))
         .and(path("/_matrix/client/v3/createRoom"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "room_id": "!room1:localhost"
         })))
+        .expect(0)
+        .mount(&mock_server)
+        .await;
+
+    // And no message may be sent into any room.
+    Mock::given(method("PUT"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "event_id": "$none" })),
+        )
+        .expect(0)
         .mount(&mock_server)
         .await;
 
@@ -158,9 +185,11 @@ async fn test_poll_with_mock_jmap() {
         jmap_matrix_bridge::services::content::RenderMode::default(),
     );
 
-    // poll() should run without error, hitting mock endpoints + mock demo section
     poller
         .poll()
         .await
-        .expect("poll() should succeed with all mocks in place");
+        .expect("poll() should succeed against an empty mailbox");
+    // Verification on server drop: every `.expect(0)` above must have stayed at
+    // zero. poll() returning Ok proves little on its own — per-email failures are
+    // swallowed by design — so the negative expectations are the real assertion.
 }
