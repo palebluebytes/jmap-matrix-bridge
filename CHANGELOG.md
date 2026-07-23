@@ -8,6 +8,37 @@ From v0.3.0 onward this file is maintained automatically by
 [release-plz](https://release-plz.dev) from the Conventional Commit history
 (see [ADR-0008](docs/adr/0008-ci-and-release-flow.md)).
 
+## [0.5.0](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.4.0...v0.5.0) - 2026-07-23
+
+### Added
+
+- *(sync)* reflect a mail going unread in JMAP onto Matrix (marked_unread)
+- *(sync)* reflect Element "mark unread" onto the mail ($seen)
+- *(space)* brand the email space with the bridge logo
+- *(playground)* add disposable local VM sandbox
+
+### Fixed
+
+- *(space)* name the email space after the address, not "email <addr>"
+- *(sync)* fetch the Keywords property so read-state mirroring works
+- *(sync)* join the real user before posting a thread's first email
+- *(playground)* don't expose the VM-only sandbox as a nixosConfiguration
+
+### Other
+
+- Merge remote-tracking branch 'origin/main' into feat/read-unread-state-sync
+- *(check)* verify read/unread both ways through the real double-puppet
+- *(check)* assert tuwunel round-trips m.marked_unread via /sync
+- apply rustfmt to the read-receipt test
+- *(events)* assert an Element read receipt marks the JMAP email $seen
+- *(agents)* record why is_ok() is not a test oracle here
+- *(sync)* assert an empty mailbox bridges nothing
+- *(sync)* make test_poll_hits_jmap_and_matrix_endpoints hit Matrix
+- *(bridge)* give test_full_bridge_cycle an oracle that can fail
+- *(nix)* stop excluding hermetic tests from the sandboxed gate
+- *(sender)* mock each send round-trip by method, not a catch-all
+- *(check)* assert real end-to-end delivery via a local example.com recipient
+
 ## [0.4.0](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.3.2...v0.4.0) - 2026-07-16
 
 ### Added
