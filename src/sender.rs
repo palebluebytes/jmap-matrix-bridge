@@ -425,11 +425,22 @@ impl JmapSender {
 
     /// Mark an email as read in JMAP by adding the `$seen` keyword.
     pub async fn mark_as_read(&self, email_id: &str) -> Result<()> {
+        self.set_seen(email_id, true).await
+    }
+
+    /// Mark an email as unread in JMAP by removing the `$seen` keyword — the
+    /// mail-side reflection of a Matrix "mark unread" (`m.marked_unread`).
+    pub async fn mark_as_unread(&self, email_id: &str) -> Result<()> {
+        self.set_seen(email_id, false).await
+    }
+
+    /// Set (or clear) the `$seen` keyword on an email via `Email/set`.
+    async fn set_seen(&self, email_id: &str, seen: bool) -> Result<()> {
         let mut request = self.client.build();
         {
             let params = request.params(Method::SetEmail);
             let mut args = Arguments::email_set(params);
-            args.email_set_mut().update(email_id).keyword("$seen", true);
+            args.email_set_mut().update(email_id).keyword("$seen", seen);
             request.add_method_call(Method::SetEmail, args);
         }
 

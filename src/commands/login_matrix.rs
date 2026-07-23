@@ -110,7 +110,11 @@ impl Command for LoginMatrixCommand {
 
             state
                 .puppet_manager
-                .ensure_running(ctx.sender_id.to_owned(), token)
+                .ensure_running(
+                    ctx.sender_id.to_owned(),
+                    token,
+                    state.client_manager.clone(),
+                )
                 .await;
             info!(
                 "Enabled Matrix double-puppet auto-join for {}",

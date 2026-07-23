@@ -130,7 +130,7 @@ pub(crate) async fn try_auto_double_puppet(state: &AppState, mxid: &str) {
             {
                 state
                     .puppet_manager
-                    .ensure_running(mxid.to_owned(), token)
+                    .ensure_running(mxid.to_owned(), token, state.client_manager.clone())
                     .await;
                 info!("Auto-enabled double-puppet for {mxid} via shared-secret-auth");
             }

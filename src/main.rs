@@ -639,7 +639,11 @@ async fn main() -> anyhow::Result<()> {
                                         );
                                     }
                                     puppet_manager
-                                        .ensure_running(user.mxid.clone(), token)
+                                        .ensure_running(
+                                            user.mxid.clone(),
+                                            token,
+                                            client_manager.clone(),
+                                        )
                                         .await;
                                 }
                                 Err(e) => tracing::warn!(
@@ -666,7 +670,11 @@ async fn main() -> anyhow::Result<()> {
                         match store.get_matrix_puppet_token(&user.matrix_user_id).await {
                             Ok(Some(token)) => {
                                 puppet_manager
-                                    .ensure_running(user.matrix_user_id, token)
+                                    .ensure_running(
+                                        user.matrix_user_id,
+                                        token,
+                                        client_manager.clone(),
+                                    )
                                     .await;
                             }
                             Ok(None) => {}
