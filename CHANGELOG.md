@@ -8,6 +8,22 @@ From v0.3.0 onward this file is maintained automatically by
 [release-plz](https://release-plz.dev) from the Conventional Commit history
 (see [ADR-0008](docs/adr/0008-ci-and-release-flow.md)).
 
+## [0.5.1](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.5.0...v0.5.1) - 2026-07-27
+
+### Other
+
+- bump thiserror from 2.0.18 to 2.0.19
+- Merge pull request #54 from palebluebytes/dependabot/cargo/bytes-1.12.1
+- Merge pull request #62 from palebluebytes/dependabot/cargo/uuid-1.24.0
+- Merge pull request #74 from palebluebytes/dependabot/cargo/base64-0.23.0
+- Merge pull request #73 from palebluebytes/dependabot/cargo/tokio-1.53.1
+- Merge pull request #72 from palebluebytes/dependabot/cargo/ammonia-4.1.4
+- Merge pull request #70 from palebluebytes/dependabot/cargo/futures-util-0.3.33
+- Merge pull request #69 from palebluebytes/dependabot/cargo/clap-4.6.4
+- Merge pull request #68 from palebluebytes/dependabot/cargo/jiff-0.2.34
+- Merge pull request #59 from palebluebytes/release-plz-2026-07-16T16-05-15Z
+- bump serde_json from 1.0.150 to 1.0.151
+
 ## [0.5.0](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.4.0...v0.5.0) - 2026-07-23
 
 ### Added
