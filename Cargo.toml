@@ -36,7 +36,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 tower = { version = "0.5", features = ["util"] }
 
 jmap-client = "0.4"
-base64 = "0.22"
+base64 = "0.23"
 # Constant-time hs_token comparison (auth middleware).
 subtle = "2"
 # Percent-encode untrusted values into the JMAP download URL template.
