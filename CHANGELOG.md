@@ -13,10 +13,12 @@ From v0.3.0 onward this file is maintained automatically by
 ### Fixed
 
 - *(ghost)* recognize show-images sent as a reply, past the rich-reply fallback
+- *(send-delay)* only confirm a send with ✅ when it was actually held
 
 ### Other
 
 - Merge pull request #82 from palebluebytes/fix/show-images-reply-fallback
+- Merge pull request #83 from palebluebytes/fix/send-state-check-only-when-held
 
 ## [0.5.1](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.5.0...v0.5.1) - 2026-07-27
 
