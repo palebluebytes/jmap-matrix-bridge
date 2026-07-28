@@ -8,6 +8,16 @@ From v0.3.0 onward this file is maintained automatically by
 [release-plz](https://release-plz.dev) from the Conventional Commit history
 (see [ADR-0008](docs/adr/0008-ci-and-release-flow.md)).
 
+## [0.5.2](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.5.1...v0.5.2) - 2026-07-28
+
+### Fixed
+
+- *(ghost)* recognize show-images sent as a reply, past the rich-reply fallback
+
+### Other
+
+- Merge pull request #82 from palebluebytes/fix/show-images-reply-fallback
+
 ## [0.5.1](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.5.0...v0.5.1) - 2026-07-27
 
 ### Other
