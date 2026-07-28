@@ -8,7 +8,9 @@ use anyhow::{Context, Result};
 use jmap_client::client::Client;
 use jmap_client::email::Email;
 use jmap_client::mailbox::Role as MailboxRole;
-use matrix_sdk::ruma::events::room::message::{Relation, RoomMessageEventContent};
+use matrix_sdk::ruma::events::room::message::{
+    Relation, RoomMessageEventContent, sanitize::remove_plain_reply_fallback,
+};
 use std::fmt::Write as _;
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -185,6 +187,41 @@ fn user_label(matrix_user_id: &str) -> String {
         .to_owned()
 }
 
+/// A message- or room-scoped text command a user can type in a ghost room
+/// (ADR-0011). Each has an emoji-reaction twin, but the text command is the
+/// canonical trigger.
+#[derive(Debug, PartialEq, Eq)]
+enum GhostCommand {
+    /// `show-images` — load the replied-to email's remote images.
+    ShowImages,
+    /// `delete-room` — move the whole thread to Trash and unbridge the room.
+    DeleteRoom,
+    /// `spam` — move the whole thread to Junk and unbridge the room.
+    Spam,
+}
+
+/// Recognize a ghost-room text command in a message body, or `None` for ordinary
+/// outbound mail.
+///
+/// A message-scoped command like `show-images` is sent as a *reply* to the target
+/// email, so a Matrix client prepends the [rich-reply fallback] (`> <@sender> …`
+/// quote lines then a blank line) to `body`. Ruma's `remove_plain_reply_fallback`
+/// strips it — pinned to the spec section, so it tracks the (deprecated) fallback
+/// format for us — otherwise the trimmed body is never equal to the bare command
+/// and the user's `show-images` gets mailed to their correspondent instead of
+/// running. A body with no fallback passes through unchanged, so a client that has
+/// dropped the fallback still matches.
+///
+/// [rich-reply fallback]: https://spec.matrix.org/latest/client-server-api/#fallbacks-for-rich-replies
+fn parse_ghost_command(body: &str) -> Option<GhostCommand> {
+    match remove_plain_reply_fallback(body).trim() {
+        "show-images" | "!show-images" => Some(GhostCommand::ShowImages),
+        "delete-room" | "!delete-room" => Some(GhostCommand::DeleteRoom),
+        "spam" | "!spam" => Some(GhostCommand::Spam),
+        _ => None,
+    }
+}
+
 /// Handle a message sent by a Matrix user to a ghost room.
 ///
 /// This bridges the Matrix message into an outbound JMAP email to the address
@@ -204,21 +241,25 @@ pub async fn handle_ghost_outbound(
     let rm_id = room_id.context("No room ID")?;
     let raw_body = content.body();
 
-    // `show-images` is the text twin of the 🖼️ reaction (ADR-0011): when a user
-    // replies to a bridged email with it, load that email's remote images
-    // instead of treating the text as outbound mail. Both paths funnel into the
-    // same `images::handle_load_images_reaction` core, so they can't diverge.
-    if matches!(raw_body.trim(), "show-images" | "!show-images") {
-        return handle_show_images(state, sender_id, rm_id, content).await;
-    }
-    // `delete-room`/`spam` are the text twins of the 🗑/🚫 reactions (ADR-0011):
-    // move the whole thread to Trash/Junk and unbridge the room, rather than
-    // sending the word as mail.
-    if matches!(raw_body.trim(), "delete-room" | "!delete-room") {
-        return handle_thread_action(state, sender_id, rm_id, MailboxRole::Trash, "Trash").await;
-    }
-    if matches!(raw_body.trim(), "spam" | "!spam") {
-        return handle_thread_action(state, sender_id, rm_id, MailboxRole::Junk, "Junk").await;
+    // Text commands (ADR-0011) are the canonical twins of the 🖼️/🗑/🚫 reactions;
+    // recognize them before treating the body as outbound mail. `show-images` is
+    // message-scoped, so it is sent as a *reply* to the target email — which means
+    // its `body` arrives wrapped in the Matrix rich-reply fallback. `parse_ghost_command`
+    // strips that fallback before matching, or the command would be mailed instead
+    // of run. The reveal path funnels into the same `images::handle_load_images_reaction`
+    // core as the reaction, so text and emoji can't diverge.
+    match parse_ghost_command(raw_body) {
+        Some(GhostCommand::ShowImages) => {
+            return handle_show_images(state, sender_id, rm_id, content).await;
+        }
+        Some(GhostCommand::DeleteRoom) => {
+            return handle_thread_action(state, sender_id, rm_id, MailboxRole::Trash, "Trash")
+                .await;
+        }
+        Some(GhostCommand::Spam) => {
+            return handle_thread_action(state, sender_id, rm_id, MailboxRole::Junk, "Junk").await;
+        }
+        None => {}
     }
 
     let mut body_str = raw_body.to_owned();
@@ -719,6 +760,43 @@ mod tests {
             reply_target_event(reply.relates_to.as_ref()),
             Some("$target:localhost")
         );
+    }
+
+    #[test]
+    fn parse_ghost_command_sees_commands_through_reply_fallback() {
+        // Bare commands (sent as a plain message) parse.
+        assert_eq!(
+            parse_ghost_command("show-images"),
+            Some(GhostCommand::ShowImages)
+        );
+        assert_eq!(
+            parse_ghost_command("!show-images"),
+            Some(GhostCommand::ShowImages)
+        );
+        assert_eq!(parse_ghost_command("  spam  "), Some(GhostCommand::Spam));
+        assert_eq!(
+            parse_ghost_command("delete-room"),
+            Some(GhostCommand::DeleteRoom)
+        );
+
+        // Ordinary outbound mail is not a command.
+        assert_eq!(parse_ghost_command("please show me the images"), None);
+
+        // `show-images` is message-scoped, so it is sent as a REPLY to the target
+        // email — a Matrix rich reply prepends the quoted `> <@sender> …` fallback
+        // to `body`. It must still parse, or the reveal command is mailed to the
+        // correspondent instead of loading the pictures (the reported bug).
+        let replied = "> <@_jmap_brad=40x.com:localhost> Your invoice is attached\n\
+                       > see the graphs inline\n\
+                       \n\
+                       show-images";
+        assert_eq!(parse_ghost_command(replied), Some(GhostCommand::ShowImages));
+
+        // A genuine multi-line email reply that merely mentions the word is still mail.
+        let genuine = "> <@_jmap_brad=40x.com:localhost> Your invoice is attached\n\
+                       \n\
+                       show-images? sure, here is my reply text";
+        assert_eq!(parse_ghost_command(genuine), None);
     }
 
     #[test]
