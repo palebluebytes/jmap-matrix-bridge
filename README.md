@@ -98,9 +98,11 @@ source — with the architecture matrix and provenance verification, are in
 #        (see nix/module/README.md) — the recommended production deploy.
 
 # Anything else: the public multi-arch container image
-docker pull ghcr.io/palebluebytes/jmap-matrix-bridge:v0.5.2
-docker run --rm ghcr.io/palebluebytes/jmap-matrix-bridge:v0.5.2 run --help
+docker pull ghcr.io/palebluebytes/jmap-matrix-bridge:latest
+docker run --rm ghcr.io/palebluebytes/jmap-matrix-bridge:latest run --help
 ```
+
+`:latest` tracks the newest release; pin `:vX.Y.Z` for production.
 
 ## Configure & run
 
