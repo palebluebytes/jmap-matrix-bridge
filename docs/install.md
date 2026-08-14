@@ -45,14 +45,17 @@ nix build .#jmap-matrix-bridge
 The image is public on `ghcr.io` — no login required.
 
 ```bash
-# Pin a version (recommended for production) — or use :latest to track newest
-docker pull ghcr.io/palebluebytes/jmap-matrix-bridge:v0.5.2
-docker run --rm ghcr.io/palebluebytes/jmap-matrix-bridge:v0.5.2 run --help
+docker pull ghcr.io/palebluebytes/jmap-matrix-bridge:latest
+docker run --rm ghcr.io/palebluebytes/jmap-matrix-bridge:latest run --help
 ```
 
 It is a multi-arch manifest, so `docker`/`podman` auto-selects `linux/amd64` or
-`linux/arm64`. `:latest` is mutable (overwritten each release); pin `:vX.Y.Z` (or a
-digest) for reproducible or security-sensitive deployments.
+`linux/arm64`.
+
+`:latest` is mutable — it is overwritten on every release. **For production, pin
+`:vX.Y.Z` or a digest** from the
+[Releases](https://github.com/palebluebytes/jmap-matrix-bridge/releases) page, so
+a redeploy can't silently move you onto a new version.
 
 In a container the homeserver usually connects from another host, so set
 `LISTEN_ADDRESS=0.0.0.0` — the default `127.0.0.1` will not accept it.
@@ -61,10 +64,12 @@ In a container the homeserver usually connects from another host, so set
 
 Each tagged release (see
 [Releases](https://github.com/palebluebytes/jmap-matrix-bridge/releases)) ships a
-standalone static binary per architecture. Pick your tag and arch:
+standalone static binary per architecture. This resolves the newest release; set
+`TAG` to a specific `vX.Y.Z` instead to pin one.
 
 ```bash
-TAG=v0.5.2 ARCH=x86_64-linux
+ARCH=x86_64-linux   # or aarch64-linux
+TAG=$(curl -fsSL https://api.github.com/repos/palebluebytes/jmap-matrix-bridge/releases/latest | jq -r .tag_name)
 base="https://github.com/palebluebytes/jmap-matrix-bridge/releases/download/$TAG"
 curl -fsSL -O "$base/jmap-matrix-bridge-$TAG-$ARCH"
 curl -fsSL -O "$base/jmap-matrix-bridge-$TAG-$ARCH.sha256"
@@ -91,6 +96,6 @@ gh attestation verify jmap-matrix-bridge \
   --repo palebluebytes/jmap-matrix-bridge
 
 # Container image (by tag or digest)
-gh attestation verify oci://ghcr.io/palebluebytes/jmap-matrix-bridge:v0.5.2 \
+gh attestation verify oci://ghcr.io/palebluebytes/jmap-matrix-bridge:latest \
   --repo palebluebytes/jmap-matrix-bridge
 ```
