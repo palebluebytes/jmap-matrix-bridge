@@ -9,9 +9,10 @@ through the bridge by hand:
 - **the bridge** — built from *this* checkout, wired to both
 - **XFCE + nheko** — a lightweight desktop that auto-opens a Matrix client
 
-Watch the send-delay `⏳ → ✅` reactions, edit/redact a held message, trip the
-`❌` failure path, and so on. This is the interactive counterpart to the headless
-round-trip test in [`nix/check`](../check); it reuses the same service wiring.
+Watch an inbound email turn into a Matrix room, reply into it and have the mail
+really delivered, and drive the 🖼️/🗑/🚫 reactions. This is the interactive
+counterpart to the headless round-trip test in [`nix/check`](../check); it reuses
+the same service wiring.
 
 > ⚠️ **Not a deployment.** Plaintext credentials, auto-login, throwaway secrets.
 > It's a disposable local box — never expose it.
@@ -55,8 +56,8 @@ signing in you'll have invites from `@_jmap_bot`:
 - a **control room**, and
 - **"Alice Tester (alice@example.com)"** — created from a seeded inbound email.
 
-Accept the Alice room, reply in it, and watch the send-delay flow:
-`⏳` held 5s → **redact** to cancel / **edit** to rewrite → `✅` sent / `❌` failed.
+Accept the Alice room and type into it — that is a real reply, sent as email in
+the same thread.
 
 > Prefer Element? Open a terminal in the desktop and run `element-desktop`.
 > Want to drive it from your **host** instead of the VM window? The Matrix
@@ -72,27 +73,33 @@ Accept the Alice room, reply in it, and watch the send-delay flow:
 
 ---
 
-## Reproduce the send-delay flow (the `⏳ → ✅ / ❌` you asked about)
+## Things to try
 
-1. Open the **Alice Tester** room and send a reply (e.g. `hello back`).
-2. The bridge reacts **⏳** to your message and, the first time per room, posts
-   the explainer: *"Your messages are held 5s before sending…"*.
-3. Within the 5-second window you can:
-   - **redact** your message → the queued send is **cancelled** (nothing sent),
-   - **edit** your message → the queued body is **rewritten**.
-4. After 5s the worker submits it to Stalwart and the **⏳ is replaced by ✅**
-   (submitted) — or **❌** if delivery permanently fails.
+1. **Reply to Alice.** Open the **Alice Tester** room and type (e.g.
+   `hello back`). It goes out as email in that thread — see below for watching it
+   land.
+2. **Trash or junk a thread.** React to any message with **🗑** (move the whole
+   thread to Trash and unbridge the room) or **🚫** (move it to Junk). The text
+   commands `delete-room` and `spam` do the same thing
+   ([ADR-0011](../../docs/adr/0011-command-emoji-duality.md)).
+3. **Load remote images.** On an HTML mail, react **🖼️** — or reply to the
+   message with `show-images`.
+4. **Inject more mail** and watch new rooms appear — see the `curl` at the bottom.
+5. **Message the bot** in the control room: `help`, `status`, `signature <text>`.
 
-Change the window at any time by messaging the bridge `send-delay 10`
-(seconds), or `send-delay off`.
+> The `⏳ → ✅` send-state reactions are **not** part of this: the send-delay hold
+> window they belong to is off by default while the feature is finished
+> ([ADR-0012](../../docs/adr/0012-matrix-actions-replicate-as-reversible-moves.md)),
+> so replies here send immediately and unmarked. A permanent delivery failure
+> still produces **❌** plus a notice.
 
-### It really sends (you get a `✅`)
+### It really sends
 
 Your reply is a genuine outbound send, delivered end-to-end **inside the VM**:
 the bridge submits it against `bridgeuser@example.com`'s sending identity and
-Stalwart delivers it locally to the contact `alice@example.com`. So the held
-`⏳` resolves to `✅`, and the message actually lands in Alice's mailbox — no
-external network involved. Watch it arrive:
+Stalwart delivers it locally to the contact `alice@example.com`, so the message
+actually lands in Alice's mailbox — no external network involved. Watch it
+arrive:
 
 ```bash
 # From the host (or a guest terminal): read the contact's Inbox.
@@ -109,14 +116,15 @@ Three things make this work (all in `stalwart-provision`, no bridge changes):
    whatever `Identity/get` returns;
 3. a **local recipient** (`alice@example.com`) so delivery is loopback.
 
-### If a send *doesn't* resolve to `✅`
+### If a send doesn't arrive
 
 Watch the bridge logs live while you send (see below). The submit worker
 ([`src/retry.rs`](../../src/retry.rs)) resolves the recipient from the room's
 ghost mapping; a fresh/unmapped room, or a rejected JMAP submission, is where
 failures show up. The logs print `Sending fresh email…` /
-`Sending ghost room reply…` and either `Submitted outbound message N` (the `✅`)
-or the failure + `adding to retry queue` (the `❌`/retry path).
+`Sending ghost room reply…` and either `Submitted outbound message N` (success)
+or the failure + `adding to retry queue`. After ten failed attempts the bridge
+gives up, reacts **❌** and posts a permanent-failure notice.
 
 ---
 
@@ -126,7 +134,7 @@ or the failure + `adding to retry queue` (the `❌`/retry path).
 # Live bridge logs
 journalctl -u jmap-bridge -f
 
-# The bridge's SQLite state — inspect the outbound send-delay queue
+# The bridge's SQLite state — inspect the outbound queue
 sqlite3 /var/lib/jmap-bridge/bridge.db 'SELECT id,event_id,release_at,retry_count FROM outbound_queue;'
 sqlite3 /var/lib/jmap-bridge/bridge.db 'SELECT ghost_email,matrix_room_id FROM room_ghost_mapping;'
 
