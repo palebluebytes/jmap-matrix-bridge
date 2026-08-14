@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/palebluebytes/jmap-matrix-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/palebluebytes/jmap-matrix-bridge/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/palebluebytes/jmap-matrix-bridge?sort=semver)](https://github.com/palebluebytes/jmap-matrix-bridge/releases)
-[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
 A Rust [Matrix Application Service](https://spec.matrix.org/latest/application-service-api/)
 that bridges a [JMAP](https://jmap.io/) email account (Stalwart, Fastmail, …) into
@@ -257,6 +257,14 @@ Versioning is automated with [release-plz](https://release-plz.dev): every merge
 **cutting a release is merging that PR** — which tags the version, publishes the
 GitHub Release, and builds the static binaries + container image. The full flow and
 rationale are in [ADR-0008](docs/adr/0008-ci-and-release-flow.md).
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option. Unless you explicitly state otherwise,
+any contribution intentionally submitted for inclusion in this crate by you, as
+defined in the Apache-2.0 license, shall be dual licensed as above, without any
+additional terms or conditions.
 
 ## See also
 
