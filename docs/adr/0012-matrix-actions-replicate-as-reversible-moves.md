@@ -44,10 +44,16 @@ incidental, outbound mail is **held briefly before the JMAP submission**
 ([ADR-0007](0007-verified-send-with-retry-queue.md)) — a Gmail-style undo window.
 
 - **Send-delay.** Every outbound message sits in `outbound_queue` with a
-  "release at" time before it is submitted. Default **5 seconds**; a per-User
-  setting via `send-delay <seconds>` / `send-delay off` (stored like `signature`,
-  [ADR-0011](0011-command-emoji-duality.md) text-only command), capped at **300s**.
-  An operator-set global default can move the 5s baseline.
+  "release at" time before it is submitted. A per-User setting via
+  `send-delay <seconds>` / `send-delay off` (stored like `signature`,
+  [ADR-0011](0011-command-emoji-duality.md) text-only command), capped at **300s**,
+  over an operator-set global default.
+
+  > **Status: deferred, off by default.** The hold window shipped at a 5s default
+  > and was disabled (default **0**) in v0.4.0 while the feature is finished. The
+  > `--send-delay-default` flag and the `send-delay` command still work but are
+  > hidden from `--help` and from the user documentation, so the window described
+  > below is not what a stock deployment does today.
 - **Redact a held message** → cancel it (pulled from the queue before release); the
   email is never submitted. Redacting a message that is *retrying* after a failed
   submission likewise cancels the retry.
@@ -58,11 +64,17 @@ incidental, outbound mail is **held briefly before the JMAP submission**
   Trashing mail is 🗑️'s job, not redaction's.
 
 **Send-state is shown, never silent.** A successful send previously produced no
-confirmation at all (only failures spoke). The Bot now places a state reaction on
-the outbound message — ⏳ **held** (window open, redact to undo) → ✅ **submitted**
+confirmation at all (only failures spoke). The Bot places a state reaction on the
+outbound message — ⏳ **held** (window open, redact to undo) → ✅ **submitted**
 (verified) → ❌ **failed** (alongside the existing give-up notice) — and posts a
 one-time per-room hint explaining the hold and the glyphs. The ⏳→✅ transition *is*
 the window closing, so "what's happening" is glanceable rather than mysterious.
+
+With the hold window off, ⏳ and ✅ are both silent: ⏳ is gated on a positive
+delay, and ✅ only fires where a ⏳ hold record exists, so an instant send is
+unmarked rather than falsely confirmed. ❌ is ungated and fires whenever the retry
+queue gives up, which makes it the only send-state glyph a stock deployment
+produces.
 
 ## Considered Options
 
@@ -94,6 +106,12 @@ the window closing, so "what's happening" is glanceable rather than mysterious.
 - A plain **leave** stopping at "non-destructive" means the exact re-bridging
   behavior when new mail later arrives in a left Thread is an implementation detail,
   not a mailbox mutation — it never surprises the server.
-- **Mail is not sent instantly** — the 5s default hold is deliberate (the undo
-  window) and made visible by the ⏳ state reaction and the one-time hint, not
-  hidden. An operator who wants instant send sets the global default to 0.
+- **Mail is not sent instantly** *where the hold is enabled* — the delay is
+  deliberate (the undo window) and made visible by the ⏳ state reaction and the
+  one-time hint, not hidden. An operator who wants instant send sets the global
+  default to 0, which is also the shipped default while the feature is deferred.
+- **With the hold off, redact-to-unsend degrades to a race.** The redact and edit
+  handlers stay live and still act on any row left in `outbound_queue`, but the
+  worker ticks every 2s, so a redaction only lands if it beats that tick — and a
+  late one is a silent no-op rather than the notice promised above. The case that
+  remains reliable is cancelling a message sitting in retry backoff.
