@@ -11,7 +11,7 @@ Matrix go back out as email.
 
 The vocabulary used throughout this project (ghost, puppet, bot, thread, room,
 space, submission, backfill) is defined in [`CONTEXT.md`](CONTEXT.md). The
-architectural decisions behind it are recorded in [`docs/adr/`](docs/adr/).
+architectural decisions behind it are recorded in [`docs/adr/`](docs/adr/README.md).
 
 ## How it works
 
@@ -97,8 +97,8 @@ ships a standalone **static binary** for `x86_64-linux` and `aarch64-linux` plus
 
 ```bash
 # Pin a version (recommended for production) — or use :latest to track newest
-docker pull ghcr.io/palebluebytes/jmap-matrix-bridge:v0.2.0
-docker run --rm ghcr.io/palebluebytes/jmap-matrix-bridge:v0.2.0 run --help
+docker pull ghcr.io/palebluebytes/jmap-matrix-bridge:v0.5.2
+docker run --rm ghcr.io/palebluebytes/jmap-matrix-bridge:v0.5.2 run --help
 ```
 
 The image is a multi-arch manifest, so `docker`/`podman` auto-selects `linux/amd64`
@@ -110,7 +110,7 @@ a digest) for reproducible/security-sensitive deployments.
 Pick your release tag and architecture (`x86_64-linux` or `aarch64-linux`):
 
 ```bash
-TAG=v0.2.0 ARCH=x86_64-linux
+TAG=v0.5.2 ARCH=x86_64-linux
 base="https://github.com/palebluebytes/jmap-matrix-bridge/releases/download/$TAG"
 curl -fsSL -O "$base/jmap-matrix-bridge-$TAG-$ARCH"
 curl -fsSL -O "$base/jmap-matrix-bridge-$TAG-$ARCH.sha256"
@@ -130,7 +130,7 @@ gh attestation verify jmap-matrix-bridge \
   --repo palebluebytes/jmap-matrix-bridge
 
 # Container image (by tag or digest)
-gh attestation verify oci://ghcr.io/palebluebytes/jmap-matrix-bridge:v0.2.0 \
+gh attestation verify oci://ghcr.io/palebluebytes/jmap-matrix-bridge:v0.5.2 \
   --repo palebluebytes/jmap-matrix-bridge
 ```
 
@@ -180,10 +180,10 @@ Every flag has an environment-variable equivalent (shown in parentheses). Run
 | --- | --- | --- |
 | `--jmap-url` (`JMAP_URL`) | *required* | JMAP session/discovery URL |
 | `--matrix-url` (`MATRIX_URL`) | *required* | Matrix homeserver Client-Server API URL |
-| `--matrix-as-token` (`MATRIX_AS_TOKEN`) | *required* | Bridge → homeserver auth token (prefer the `-file` form) |
-| `--matrix-as-token-file` (`MATRIX_AS_TOKEN_FILE`) | — | File holding the AS token (keeps it out of `ps`/`/proc`) |
-| `--matrix-hs-token` (`MATRIX_HS_TOKEN`) | *required* | Homeserver → bridge transaction auth token (prefer the `-file` form) |
-| `--matrix-hs-token-file` (`MATRIX_HS_TOKEN_FILE`) | — | File holding the hs_token (keeps it out of `ps`/`/proc`) |
+| `--matrix-as-token` (`MATRIX_AS_TOKEN`) | *one of the pair* | Bridge → homeserver auth token (prefer the `-file` form) |
+| `--matrix-as-token-file` (`MATRIX_AS_TOKEN_FILE`) | *one of the pair* | File holding the AS token (keeps it out of `ps`/`/proc`) |
+| `--matrix-hs-token` (`MATRIX_HS_TOKEN`) | *one of the pair* | Homeserver → bridge transaction auth token (prefer the `-file` form) |
+| `--matrix-hs-token-file` (`MATRIX_HS_TOKEN_FILE`) | *one of the pair* | File holding the hs_token (keeps it out of `ps`/`/proc`) |
 | `--matrix-domain` (`MATRIX_DOMAIN`) | `localhost` | Matrix server name (used to build ghost mxids) |
 | `--listen-address` (`LISTEN_ADDRESS`) | `127.0.0.1` | Address to bind. Use `0.0.0.0` for container/multi-host setups where the homeserver connects from another host |
 | `--port` (`PORT`) | `8008` | TCP port the bridge listens on |
@@ -191,13 +191,19 @@ Every flag has an environment-variable equivalent (shown in parentheses). Run
 | `--encryption-key` (`ENCRYPTION_KEY`) | — | AES-256 key (base64 or hex) for credentials at rest |
 | `--encryption-key-file` (`ENCRYPTION_KEY_FILE`) | — | File holding the AES-256 key (preferred over inline) |
 | `--render-mode` (`RENDER_MODE`) | `links` | Email body rendering: `plain`, `links`, or `rich` |
-| `--quote-replies` (`QUOTE_REPLIES`) | `true` | Quote the parent in outbound replies (email-only, never shown in Matrix) |
+| `QUOTE_REPLIES` | `true` | Quote the parent in outbound replies (email-only, never shown in Matrix). **Env var only — see below** |
 | `--bridge-mailboxes` (`BRIDGE_MAILBOXES`) | `false` | Also mirror JMAP mailboxes (Inbox/Sent/…) as their own rooms |
-| `--jmap-sync-limit` (`JMAP_SYNC_LIMIT`) | `10` | Max emails fetched per poll |
+| `--jmap-sync-limit` (`JMAP_SYNC_LIMIT`) | `10` | Emails fetched per JMAP query page during sync and backfill |
 | `--user` | *(repeatable)* | Declaratively provision a user (see below) |
 | `--log-level` (`LOG_LEVEL`) | `info` | `error` \| `warn` \| `info` \| `debug` \| `trace` (global flag) |
 
 If no encryption key is given, credentials are stored in plain text (legacy mode).
+
+`--quote-replies` and `--bridge-mailboxes` are switches, not value-taking flags:
+passing `--bridge-mailboxes` turns mirroring **on**, and `--quote-replies false`
+is rejected. Since quoting defaults to on, the only way to turn it **off** is the
+environment variable — `QUOTE_REPLIES=false` (which is what the NixOS module
+does).
 
 ### Declarative provisioning
 
@@ -269,6 +275,6 @@ additional terms or conditions.
 ## See also
 
 - [`CONTEXT.md`](CONTEXT.md) — domain glossary
-- [`docs/adr/`](docs/adr/) — architecture decision records
+- [`docs/adr/`](docs/adr/README.md) — architecture decision records
 - [`AGENTS.md`](AGENTS.md) — agent/contributor conventions
 - [`nix/module/README.md`](nix/module/README.md) — NixOS module reference
