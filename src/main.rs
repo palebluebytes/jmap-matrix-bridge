@@ -116,7 +116,12 @@ enum Commands {
         /// submitted (ADR-0012). Off by default (0) while the feature is WIP; set
         /// a positive value here (or per-user via the `send-delay` command) to
         /// re-enable the hold. Clamped to 0..=300.
-        #[arg(long, env = "SEND_DELAY_DEFAULT", default_value = "0")]
+        ///
+        /// Hidden from `--help` and undocumented until the hold window is
+        /// viable: with it enabled the undo affordance is only reachable inside
+        /// a race with the 2s queue worker, and the ⏳/✅ state reactions it
+        /// gates are still unfinished. Kept functional for development.
+        #[arg(long, env = "SEND_DELAY_DEFAULT", default_value = "0", hide = true)]
         send_delay_default: i64,
 
         /// Matrix Homeserver URL
@@ -186,6 +191,8 @@ enum Commands {
         ///   - `url`        (optional) JMAP session URL; defaults to `--jmap-url`
         ///   - `token-file` (preferred) path to a file holding the JMAP token
         ///   - `token`      (alternative) the JMAP token inline (visible in argv)
+        ///   - `matrix-password-file` (optional) path to the user's Matrix
+        ///     password, enabling double-puppet auto-accept
         ///
         /// Example:
         ///   --user "mxid=@you:example.com,username=you,token-file=/run/secrets/jmap"
