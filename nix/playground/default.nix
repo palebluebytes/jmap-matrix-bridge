@@ -4,8 +4,9 @@
 # Stalwart JMAP mail server, a tuwunel Matrix homeserver, and the bridge itself —
 # but as a real, long-lived VM whose Matrix + JMAP ports are forwarded to the
 # host, so you can point a normal Matrix client (Element, nheko, …) at it and
-# click through the bridge by hand: watch the send-delay ⏳→✅ reactions, edit or
-# redact a held message, trip the ❌ failure path, and so on.
+# click through the bridge by hand: watch an inbound email become a room, reply
+# into it and have the mail really delivered, drive the 🖼️/🗑/🚫 reactions, and
+# so on.
 #
 # It is deliberately insecure (plaintext credentials, open-with-token
 # registration, no federation, throwaway tokens) — it is a disposable local
@@ -159,8 +160,8 @@ in
   # does — we create a real domain + individual (with the `user` role that grants
   # JMAP access) via the management API. Then we inject one email from
   # alice@example.com so a ghost room is waiting for you the moment you log in,
-  # ready to reply into and watch the send-delay flow. Ordered before the bridge
-  # so its declarative login finds a live mailbox.
+  # ready to reply into. Ordered before the bridge so its declarative login finds
+  # a live mailbox.
   systemd.services.stalwart-provision = {
     description = "Provision the playground Stalwart mail account";
     after = [ "stalwart.service" ];
@@ -248,7 +249,7 @@ in
               to:[{email:"${bridgeAddr}"}],
               subject:"Welcome to the playground",
               bodyStructure:{type:"text/plain",partId:"b1"},
-              bodyValues:{b1:{value:"Reply to me and watch the send-delay ⏳→✅ flow."}}
+              bodyValues:{b1:{value:"Reply to me — your reply is really delivered back to this mailbox."}}
             }}},"0"]]}')" >/dev/null
         echo "seeded inbound email"
       fi
@@ -361,12 +362,13 @@ in
         • a control room, and
         • "Alice Tester (alice@example.com)" — from a seeded email.
 
-      Accept the Alice room and reply in it to test the send-delay flow:
-        ⏳  held 5s  →  redact to cancel / edit to rewrite  →  ✅ sent / ❌ failed
+      Accept the Alice room and just type into it — that is a real reply, sent
+      as email in the same thread. React to a message with 🗑 to trash the whole
+      thread, 🚫 to junk it, or 🖼️ to load an HTML mail's remote images.
 
       Your reply really sends: the bridge submits it to ${bridgeAddr}'s
-      identity and Stalwart delivers it locally to the contact ${contactAddr},
-      so you'll see ✅. Watch it actually arrive at the contact's mailbox with:
+      identity and Stalwart delivers it locally to the contact ${contactAddr}.
+      Watch it actually arrive at the contact's mailbox with:
 
         curl -sS -u ${contactUser}:${contactPass} http://localhost:${toString jmapPort}/jmap/session
 
