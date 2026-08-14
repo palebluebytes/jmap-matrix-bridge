@@ -8,6 +8,19 @@ From v0.3.0 onward this file is maintained automatically by
 [release-plz](https://release-plz.dev) from the Conventional Commit history
 (see [ADR-0008](docs/adr/0008-ci-and-release-flow.md)).
 
+## [0.5.3](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.5.2...v0.5.3) - 2026-08-14
+
+### Other
+
+- add CONTRIBUTING.md
+- *(readme)* restructure around a quickstart and known limitations
+- *(send-delay)* hide the unfinished send-delay surface
+- *(playground)* demo what the bridge actually does today
+- add install and configuration guides
+- *(readme)* correct stale facts against v0.5.2
+- *(adr)* correct the send-delay status in ADR-0012
+- add the MIT and Apache-2.0 license files
+
 ## [0.5.2](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.5.1...v0.5.2) - 2026-07-28
 
 ### Fixed
