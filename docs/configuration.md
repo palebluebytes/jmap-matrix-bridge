@@ -23,8 +23,8 @@ the ones that need more than a line.
 | `--double-puppet-secret` (`DOUBLE_PUPPET_SECRET`) | — | Shared secret enabling automatic double-puppeting |
 | `--double-puppet-secret-file` (`DOUBLE_PUPPET_SECRET_FILE`) | — | File holding that secret (preferred) |
 | `--render-mode` (`RENDER_MODE`) | `links` | Email body rendering: `plain`, `links`, or `rich` |
-| `QUOTE_REPLIES` | `true` | Quote the parent in outbound replies (email-only, never shown in Matrix). **Env var only — see [Switches](#switches-not-value-taking-flags)** |
-| `--bridge-mailboxes` (`BRIDGE_MAILBOXES`) | `false` | Also mirror JMAP mailboxes (Inbox/Sent/…) as their own rooms |
+| `--quote-replies [BOOL]` (`QUOTE_REPLIES`) | `true` | Quote the parent in outbound replies (email-only, never shown in Matrix) — see [Boolean flags](#boolean-flags) |
+| `--bridge-mailboxes [BOOL]` (`BRIDGE_MAILBOXES`) | `false` | Also mirror JMAP mailboxes (Inbox/Sent/…) as their own rooms |
 | `--jmap-sync-limit` (`JMAP_SYNC_LIMIT`) | `10` | Emails fetched per JMAP query page during sync and backfill |
 | `--permission KEY=LEVEL` | *(repeatable)* | Grant bridge access — see [Permissions](#permissions) |
 | `--user SPEC` | *(repeatable)* | Declaratively provision a user — see [Declarative provisioning](#declarative-provisioning) |
@@ -37,12 +37,24 @@ The token flags come in pairs: supply **exactly one** of `--matrix-as-token` /
 
 If no encryption key is given, credentials are stored in plain text (legacy mode).
 
-### Switches, not value-taking flags
+### Boolean flags
 
-`--quote-replies` and `--bridge-mailboxes` are switches: passing
-`--bridge-mailboxes` turns mirroring **on**, and `--quote-replies false` is
-rejected. Since quoting defaults to on, the only way to turn it **off** is the
-environment variable, `QUOTE_REPLIES=false` — which is what the NixOS module does.
+`--quote-replies` and `--bridge-mailboxes` take an **optional** `true`/`false`
+value. Bare means `true`, so all three spellings below are valid:
+
+```bash
+--bridge-mailboxes            # on
+--quote-replies false         # off
+--quote-replies=false         # off (same thing)
+```
+
+That matters most for `--quote-replies`, which defaults to **on**: passing the
+bare flag can only re-affirm the default, so give it an explicit `false` to turn
+quoting off.
+
+The environment equivalents take the same two values (`QUOTE_REPLIES=false`),
+which is what the NixOS module sets. Only `true` and `false` are accepted —
+`QUOTE_REPLIES=0`, `no`, or `off` is a startup error, not a synonym.
 
 ## Permissions
 

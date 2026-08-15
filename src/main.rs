@@ -97,7 +97,18 @@ enum Commands {
 
         /// Mirror JMAP mailboxes (Inbox/Sent/…) as their own Matrix rooms.
         /// Off by default — email lives in per-contact/per-thread rooms.
-        #[arg(long, env = "BRIDGE_MAILBOXES", default_value = "false")]
+        ///
+        /// Takes an optional value: bare `--bridge-mailboxes` means `true`,
+        /// and `--bridge-mailboxes false` turns it back off.
+        #[arg(
+            long,
+            env = "BRIDGE_MAILBOXES",
+            action = clap::ArgAction::Set,
+            num_args = 0..=1,
+            default_value = "false",
+            default_missing_value = "true",
+            value_name = "BOOL"
+        )]
         bridge_mailboxes: bool,
 
         /// How email bodies render into Matrix messages: `plain` (text only),
@@ -109,7 +120,22 @@ enum Commands {
         /// Quote the parent message in outbound threaded replies (standard email
         /// convention). On by default. The quote lives only in the outbound
         /// email — it never appears in Matrix.
-        #[arg(long, env = "QUOTE_REPLIES", default_value = "true")]
+        ///
+        /// Takes an optional value: bare `--quote-replies` means `true`, and
+        /// `--quote-replies false` turns quoting off.
+        //
+        // `default_missing_value` is what keeps the bare spelling working: it
+        // predates #96 and could be in someone's unit file, so it must not
+        // start erroring just because the flag now takes a value.
+        #[arg(
+            long,
+            env = "QUOTE_REPLIES",
+            action = clap::ArgAction::Set,
+            num_args = 0..=1,
+            default_value = "true",
+            default_missing_value = "true",
+            value_name = "BOOL"
+        )]
         quote_replies: bool,
 
         /// Default send-delay (undo) window in seconds before outbound mail is
@@ -782,6 +808,164 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory as _;
+
+    /// Argv for a minimal `run` invocation — the two required flags, plus `extra`.
+    fn run_argv<'a>(extra: &[&'a str]) -> Vec<&'a str> {
+        let mut argv = vec![
+            "jmap-matrix-bridge",
+            "run",
+            "--jmap-url",
+            "https://jmap.example/",
+            "--matrix-url",
+            "https://matrix.example/",
+        ];
+        argv.extend_from_slice(extra);
+        argv
+    }
+
+    fn try_parse_run(extra: &[&str]) -> Result<Commands, clap::Error> {
+        Cli::try_parse_from(run_argv(extra)).map(|cli| cli.command)
+    }
+
+    /// The (`--quote-replies`, `--bridge-mailboxes`) pair `extra` parses to.
+    fn parsed_bool_flags(extra: &[&str]) -> (bool, bool) {
+        match try_parse_run(extra).expect("run args should parse") {
+            Commands::Run {
+                quote_replies,
+                bridge_mailboxes,
+                ..
+            } => (quote_replies, bridge_mailboxes),
+            Commands::GenerateRegistration { .. } => panic!("expected the run subcommand"),
+        }
+    }
+
+    fn quoting_enabled(extra: &[&str]) -> bool {
+        parsed_bool_flags(extra).0
+    }
+
+    fn mailbox_mirroring_enabled(extra: &[&str]) -> bool {
+        parsed_bool_flags(extra).1
+    }
+
+    /// The `run` subcommand's definition, for asserting on the declared surface
+    /// (env bindings, rendered help) rather than on parse results.
+    fn run_command() -> clap::Command {
+        Cli::command()
+            .find_subcommand("run")
+            .expect("run subcommand exists")
+            .clone()
+    }
+
+    #[test]
+    fn test_quote_replies_defaults_on() {
+        assert!(quoting_enabled(&[]));
+    }
+
+    #[test]
+    fn test_quote_replies_bare_flag_still_sets_it() {
+        // The bare spelling predates #96, so it must keep parsing. Asserting on
+        // the value alone would pass by construction (the default is already
+        // true) — the value *source* is what proves the flag did the work.
+        let matches = Cli::command()
+            .try_get_matches_from(run_argv(&["--quote-replies"]))
+            .expect("bare --quote-replies should still parse");
+        let run = matches
+            .subcommand_matches("run")
+            .expect("the run subcommand matched");
+
+        assert_eq!(
+            run.value_source("quote_replies"),
+            Some(clap::parser::ValueSource::CommandLine)
+        );
+        assert_eq!(run.get_one::<bool>("quote_replies"), Some(&true));
+    }
+
+    #[test]
+    fn test_quote_replies_can_be_disabled_from_the_cli() {
+        // The whole point of #96: there must be a CLI spelling that turns
+        // quoting off, not just the QUOTE_REPLIES env var.
+        assert!(!quoting_enabled(&["--quote-replies", "false"]));
+        assert!(!quoting_enabled(&["--quote-replies=false"]));
+        assert!(quoting_enabled(&["--quote-replies", "true"]));
+    }
+
+    #[test]
+    fn test_quote_replies_rejects_non_boolean() {
+        let Err(err) = try_parse_run(&["--quote-replies", "sometimes"]) else {
+            panic!("a non-boolean value must be rejected");
+        };
+        // Not merely "rejected somehow": an InvalidValue means clap took
+        // `sometimes` as this flag's value and judged it, rather than treating
+        // it as a stray argument the way the old switch spelling did.
+        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue, "{err}");
+        assert!(err.to_string().contains("sometimes"), "{err}");
+    }
+
+    #[test]
+    fn test_bridge_mailboxes_takes_an_optional_value() {
+        assert!(!mailbox_mirroring_enabled(&[]));
+        assert!(mailbox_mirroring_enabled(&["--bridge-mailboxes"]));
+        assert!(mailbox_mirroring_enabled(&["--bridge-mailboxes", "true"]));
+        assert!(!mailbox_mirroring_enabled(&["--bridge-mailboxes", "false"]));
+    }
+
+    #[test]
+    fn test_boolean_flags_still_read_their_env_vars() {
+        // The NixOS module configures both flags purely through the environment
+        // (nix/module/default.nix), so these bindings are load-bearing. They
+        // can't be exercised end-to-end in-process: this crate forbids unsafe
+        // code and `std::env::set_var` is unsafe as of Rust 2024.
+        let run = run_command();
+        for (id, var) in [
+            ("quote_replies", "QUOTE_REPLIES"),
+            ("bridge_mailboxes", "BRIDGE_MAILBOXES"),
+        ] {
+            let arg = run
+                .get_arguments()
+                .find(|a| a.get_id().as_str() == id)
+                .unwrap_or_else(|| panic!("{id} is a flag on `run`"));
+            assert_eq!(
+                arg.get_env().and_then(std::ffi::OsStr::to_str),
+                Some(var),
+                "{id} must stay bound to {var}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_help_shows_how_to_disable_quoting() {
+        // Short help (`-h`), not `--help`: the terser form is the one that has
+        // to carry the answer.
+        let help = run_command().render_help().to_string();
+
+        let mut lines = help
+            .lines()
+            .skip_while(|l| !l.trim_start().starts_with("--quote-replies"));
+        let header = lines.next().expect("--quote-replies is listed in -h");
+        // An entry's continuation lines are indented past its header, so the
+        // entry ends at the next line indented no further — whatever that line
+        // happens to start with.
+        let indent = header.len() - header.trim_start().len();
+        let entry: Vec<&str> = std::iter::once(header)
+            .chain(
+                lines
+                    .take_while(|l| l.trim().is_empty() || l.len() - l.trim_start().len() > indent),
+            )
+            .collect();
+
+        assert!(
+            header.contains("[<BOOL>]"),
+            "-h must show the flag takes an optional value, got: {header}"
+        );
+        assert!(
+            entry
+                .iter()
+                .any(|l| l.contains("[possible values: true, false]")),
+            "-h must show how to disable quoting:\n{}",
+            entry.join("\n")
+        );
+    }
 
     #[test]
     fn test_registration_generation() {
