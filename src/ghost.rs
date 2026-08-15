@@ -267,7 +267,7 @@ pub async fn handle_ghost_outbound(
     // message-scoped, so it is sent as a *reply* to the target email — which means
     // its `body` arrives wrapped in the Matrix rich-reply fallback. `parse_ghost_command`
     // strips that fallback before matching, or the command would be mailed instead
-    // of run. The reveal path funnels into the same `images::handle_load_images_reaction`
+    // of run. The reveal path funnels into the same `images::handle_load_images`
     // core as the reaction, so text and emoji can't diverge.
     match parse_ghost_command(raw_body) {
         Some(GhostCommand::ShowImages) => {
@@ -464,6 +464,8 @@ async fn handle_show_images(
     content: &RoomMessageEventContent,
 ) -> Result<()> {
     // A de-permissioned user can't act, even on a room they once used (ADR-0010).
+    // The shared path checks this too (`services::images`); returning here as
+    // well keeps the usage hint below from answering a sender who may not act.
     if state.permissions.level_for(sender_id).is_none() {
         return Ok(());
     }
@@ -476,8 +478,7 @@ async fn handle_show_images(
         .await;
         return Ok(());
     };
-    crate::services::images::handle_load_images_reaction(state, sender_id, rm_id, target_event_id)
-        .await
+    crate::services::images::handle_load_images(state, sender_id, rm_id, target_event_id).await
 }
 
 /// 🗑 wastebasket (U+1F5D1) — the reaction twin of `delete-room` (→ Trash).
