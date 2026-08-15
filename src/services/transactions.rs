@@ -112,7 +112,7 @@ pub async fn process_transaction(
                         let rm_id = rm_id.to_owned();
                         let target = annotation.event_id.to_string();
                         tokio::spawn(async move {
-                            if let Err(err) = crate::services::images::handle_load_images_reaction(
+                            if let Err(err) = crate::services::images::handle_load_images(
                                 &state, &sender_id, &rm_id, &target,
                             )
                             .await

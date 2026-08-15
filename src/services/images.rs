@@ -3,9 +3,10 @@
 //! Newsletter `<img>` are remote `https://` URLs, which Matrix forbids inline
 //! (only `mxc://` renders). Rather than fetch them server-side for every email —
 //! which would trip the sender's tracking pixels automatically — we load a
-//! single email's images only when the user opts in by reacting to that one
-//! message with 🖼️. The reacted message is then edited in place to show the
-//! images inline. Strictly per-message: only the reacted email is touched.
+//! single email's images only when the user opts in for that one message — by
+//! reacting 🖼️ or replying `show-images` (ADR-0011). The message is then edited
+//! in place to show the images inline. Strictly per-message: only the email the
+//! user pointed at is touched.
 
 use crate::matrix::MatrixClient;
 use crate::routes::AppState;
@@ -29,25 +30,37 @@ pub(crate) fn is_load_images_reaction(key: &str) -> bool {
     key.chars().any(|c| c == LOAD_IMAGES_CODEPOINT)
 }
 
-/// Load and inline the images of the single bridged email that `reacted_event_id`
-/// refers to, then edit that message in place. No-op (logged) when the event
-/// isn't a bridged email, the user isn't logged in, or there's nothing loadable.
-pub(crate) async fn handle_load_images_reaction(
+/// Load and inline the images of the single bridged email that `target_event_id`
+/// refers to, then edit that message in place. No-op (logged) when the sender may
+/// not use the bridge, the event isn't a bridged email, the user isn't logged in,
+/// or there's nothing loadable.
+///
+/// Both the 🖼️ reaction and its `show-images` text twin land here, so the
+/// permission gate lives on this shared path rather than in either caller — the
+/// two must never drift (ADR-0011).
+pub(crate) async fn handle_load_images(
     state: &AppState,
-    user_sender_id: &str,
+    sender_id: &str,
     room_id: &str,
-    reacted_event_id: &str,
+    target_event_id: &str,
 ) -> Result<()> {
+    // A de-permissioned user can't act, even on a room they once used, and even
+    // while their JMAP client is still live (ADR-0010). Loading remote images
+    // tells the correspondent their mail was opened, so it is theirs to withhold.
+    if state.permissions.level_for(sender_id).is_none() {
+        debug!(%sender_id, "Image load from a sender without permission; ignoring");
+        return Ok(());
+    }
     let store = &state.client_manager.store;
     let matrix = &state.client_manager.matrix;
 
-    let Some(email_id) = store.get_email_id_from_event_id(reacted_event_id).await? else {
-        debug!(%reacted_event_id, "Image reaction on a non-email event; ignoring");
+    let Some(email_id) = store.get_email_id_from_event_id(target_event_id).await? else {
+        debug!(%target_event_id, "Image load on a non-email event; ignoring");
         return Ok(());
     };
     // The m.replace edit must be authored by the original sender (the ghost).
     let Some(ghost_email) = store.get_ghost_email_by_room(room_id).await? else {
-        debug!(%room_id, "Image reaction in a non-ghost room; ignoring");
+        debug!(%room_id, "Image load in a non-ghost room; ignoring");
         return Ok(());
     };
     let ghost_user_id = format!(
@@ -56,8 +69,8 @@ pub(crate) async fn handle_load_images_reaction(
         matrix.domain
     );
 
-    let Some(client) = state.client_manager.get_client(user_sender_id).await else {
-        warn!(%user_sender_id, "No JMAP client for image reaction (not logged in?)");
+    let Some(client) = state.client_manager.get_client(sender_id).await else {
+        warn!(%sender_id, "No JMAP client for image load (not logged in?)");
         return Ok(());
     };
     let Some(email) = fetch_email(&client, &email_id).await? else {
@@ -73,7 +86,7 @@ pub(crate) async fn handle_load_images_reaction(
     inline_email_images(
         matrix,
         room_id,
-        reacted_event_id,
+        target_event_id,
         &ghost_user_id,
         &html,
         &plain,
@@ -88,7 +101,7 @@ pub(crate) async fn handle_load_images_reaction(
 async fn inline_email_images(
     matrix: &MatrixClient,
     room_id: &str,
-    reacted_event_id: &str,
+    target_event_id: &str,
     ghost_user_id: &str,
     html: &str,
     plain: &str,
@@ -124,7 +137,7 @@ async fn inline_email_images(
 
     let rich = content::render_inline_images(html, &url_to_mxc);
     matrix
-        .send_edit_as(room_id, reacted_event_id, plain, &rich, ghost_user_id)
+        .send_edit_as(room_id, target_event_id, plain, &rich, ghost_user_id)
         .await?;
     info!(
         loaded = url_to_mxc.len(),
@@ -293,5 +306,191 @@ mod tests {
             body.contains("m.new_content"),
             "edit must be an m.replace with new content: {body}"
         );
+    }
+
+    /// Fixtures for the permission gate on the 🖼️ path (#97): the reaction must
+    /// refuse exactly the senders its `show-images` text twin refuses (ADR-0010,
+    /// ADR-0011).
+    mod permission_gate {
+        use crate::client_manager::ClientManager;
+        use crate::matrix::MatrixClient;
+        use crate::permissions::Permissions;
+        use crate::puppet::PuppetManager;
+        use crate::routes::AppState;
+        use crate::state::StateStore;
+        use crate::store::Store;
+        use std::sync::Arc;
+        use wiremock::matchers::{body_string_contains, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        const ROOM_ID: &str = "!room:localhost";
+        const EVENT_ID: &str = "$msg:localhost";
+        const EMAIL_ID: &str = "email-1";
+
+        /// JMAP session discovery, so `login` can connect a real client.
+        async fn mount_jmap(server: &MockServer) {
+            let uri = server.uri();
+            Mock::given(method("GET"))
+                .and(path("/.well-known/jmap"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "username": "user",
+                    "accounts": { "A1": { "name": "user", "isPersonal": true, "isReadOnly": false,
+                        "accountCapabilities": {
+                            "urn:ietf:params:jmap:core": {},
+                            "urn:ietf:params:jmap:mail": {} } } },
+                    "primaryAccounts": {
+                        "urn:ietf:params:jmap:core": "A1",
+                        "urn:ietf:params:jmap:mail": "A1" },
+                    "apiUrl": format!("{uri}/api"),
+                    "downloadUrl": format!("{uri}/download"),
+                    "uploadUrl": format!("{uri}/upload"),
+                    "eventSourceUrl": format!("{uri}/events"),
+                    "capabilities": {
+                        "urn:ietf:params:jmap:core": {},
+                        "urn:ietf:params:jmap:mail": {} },
+                    "state": "s1"
+                })))
+                .mount(server)
+                .await;
+            // The re-fetch the reaction makes. An empty list is enough: the
+            // oracle is whether the request happens at all.
+            Mock::given(method("POST"))
+                .and(path("/api"))
+                .and(body_string_contains("Email/get"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "sessionState": "s1",
+                    "methodResponses": [["Email/get", { "accountId": "A1", "state": "s", "list": [], "notFound": [] }, "0"]]
+                })))
+                .mount(server)
+                .await;
+        }
+
+        /// An `AppState` where `sender` holds a live JMAP client and reacted to a
+        /// bridged email in a ghost room — the de-permissioned-but-logged-in
+        /// situation #97 is about. `permissions` decides whether they may act.
+        #[allow(clippy::unwrap_used)]
+        async fn state_with_logged_in_sender(
+            server: &MockServer,
+            sender: &str,
+            permissions: Permissions,
+        ) -> AppState {
+            let store = Store::new_in_memory(None).await.unwrap();
+            let matrix = MatrixClient::new(&server.uri(), "as_token", "localhost")
+                .await
+                .unwrap();
+            let client_manager = Arc::new(ClientManager::new(store.clone(), matrix, 10));
+            client_manager
+                .login(
+                    sender.to_owned(),
+                    "user".to_owned(),
+                    "secret".to_owned(),
+                    server.uri(),
+                )
+                .await
+                .unwrap();
+            // The poller issues JMAP calls of its own; stop it so every request
+            // the assertions see belongs to the reaction.
+            client_manager.abort_poller(sender).await;
+
+            store
+                .save_message_mapping(EMAIL_ID, EVENT_ID)
+                .await
+                .unwrap();
+            store
+                .save_room_ghost_mapping(ROOM_ID, "brad@x.com", sender)
+                .await
+                .unwrap();
+
+            AppState {
+                client_manager,
+                state_store: Arc::new(StateStore::new()),
+                puppet_manager: Arc::new(PuppetManager::new(
+                    String::new(),
+                    "@_jmap_bot:localhost".to_owned(),
+                )),
+                permissions: Arc::new(permissions),
+                double_puppet_secret: None,
+                hs_token: "hs_token".to_owned(),
+            }
+        }
+
+        /// How many times the email was re-fetched from JMAP — the first thing the
+        /// reaction does with the user's credentials, and so the visible edge of
+        /// "this action ran".
+        #[allow(clippy::unwrap_used)]
+        async fn email_fetches(server: &MockServer) -> usize {
+            server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .filter(|r| {
+                    r.url.path() == "/api" && String::from_utf8_lossy(&r.body).contains("Email/get")
+                })
+                .count()
+        }
+
+        #[tokio::test]
+        #[allow(clippy::unwrap_used)]
+        async fn permitted_sender_loads_images() {
+            let server = MockServer::start().await;
+            mount_jmap(&server).await;
+            let state = state_with_logged_in_sender(
+                &server,
+                "@user:localhost",
+                Permissions::from_specs(&["@user:localhost=user".to_owned()], "localhost").unwrap(),
+            )
+            .await;
+
+            super::super::handle_load_images(&state, "@user:localhost", ROOM_ID, EVENT_ID)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                email_fetches(&server).await,
+                1,
+                "a permitted sender's 🖼️ must re-fetch the email to load its images"
+            );
+        }
+
+        /// The gap #97 reports: a sender who has been de-permissioned but still
+        /// has a live JMAP client could load remote images by reacting, while the
+        /// identical `show-images` command refused them. Loading images signals to
+        /// the correspondent that their mail was opened, so the reaction must
+        /// refuse too.
+        #[tokio::test]
+        #[allow(clippy::unwrap_used)]
+        async fn unpermitted_sender_loads_nothing() {
+            let server = MockServer::start().await;
+            mount_jmap(&server).await;
+            let state = state_with_logged_in_sender(
+                &server,
+                "@denied:localhost",
+                // Permits somebody else; "@denied:localhost" matches no entry.
+                Permissions::from_specs(&["@other:localhost=user".to_owned()], "localhost")
+                    .unwrap(),
+            )
+            .await;
+
+            super::super::handle_load_images(&state, "@denied:localhost", ROOM_ID, EVENT_ID)
+                .await
+                .unwrap();
+
+            assert_eq!(
+                email_fetches(&server).await,
+                0,
+                "a de-permissioned sender's 🖼️ must not touch their mail"
+            );
+            // ...and nothing reached the room: no in-place edit was sent.
+            assert!(
+                !server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|r| r.url.path().contains("/send/m.room.message/")),
+                "a de-permissioned sender's 🖼️ must not edit the message"
+            );
+        }
     }
 }
