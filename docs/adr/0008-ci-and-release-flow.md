@@ -116,6 +116,19 @@ No release-plz configuration fixes this: the commit set is assembled by release-
 itself before git-cliff ever sees it, so `[changelog]` options and a version pin are
 both irrelevant.
 
+**Decided:** merge commits are disabled on the repository, leaving squash (the
+default) and rebase — both fast-forward `main`, so the walk cannot fork. The
+alternative, *Require branches to be up to date before merging*, was rejected: it
+preserves merge commits but forces a full `nix flake check` re-run on both
+architectures every time another PR lands first, which is ~45 minutes of serialized
+waiting per dependabot batch.
+
+One consequence of squashing: a multi-commit PR takes its commit subject from the
+**PR title**, and that subject is what lands in `CHANGELOG.md` and the Release body.
+So PR titles are release notes — write them as Conventional Commit subjects.
+(Single-commit PRs keep their own subject; GitHub's `squash_title` is
+`COMMIT_OR_PR_TITLE`.)
+
 ## Considered Options
 
 - **A bespoke `cargo` CI matrix (rejected)** — would duplicate the toolchain, system
