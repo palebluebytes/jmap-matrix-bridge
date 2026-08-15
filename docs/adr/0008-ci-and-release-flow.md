@@ -80,6 +80,55 @@ bug report, PR, downstream packaging, or non-author `ghcr` pulls). The `1.0.0` b
 *one* sanctioned exception to the "never hand-edit the version" rule (or set it via release-plz
 config so it still flows through the PR).
 
+## Merges into `main` must fast-forward `main`
+
+**A PR branch that is behind `main` at merge time loses commits from the changelog.**
+release-plz does not ask git for "the commits since the last tag". It walks history
+one commit at a time (`release_plz_core::updater::get_package_diff`): it runs
+`git log --format=%H -n 1 -- <package path>`, checks that commit out, then repeats
+`git log --format=%H -n 2 -- <package path>` and checks out the second entry. Because
+each step **re-roots `git log` at the commit it just checked out**, the walk collapses
+history into a single ancestry chain: at a merge it follows whichever parent `git log`
+lists first (commit-date order) and every commit on the other parent becomes
+unreachable for the rest of the walk. Those commits are dropped from `CHANGELOG.md`
+and from the GitHub Release body with no warning and no failure. (Merge commits
+themselves are usually invisible too — release-plz records a commit only when
+`git show --name-only` reports files, which is empty for a conflict-free merge.)
+
+This has bitten twice: `fix(send-delay)` was missing from v0.5.2 and
+`fix(cli): --quote-replies` from v0.5.4, both hand-patched onto the release PR after
+the fact. Both times two PRs were cut from the same base and merged back to back, so
+the second merge had two divergent parents.
+
+The condition that makes the walk correct is simple: **every merge into `main` must be
+a fast-forward of `main`** — either squash/rebase merge, or a merge commit whose branch
+was brought up to date first (GitHub's *Require branches to be up to date before
+merging*). Then the merge is TREESAME to the branch parent, git's history
+simplification drops it, and the walk continues down the one true chain. This is a
+repository **setting**, so `.github/workflows/release-plz.yml` carries the mechanical
+half: a `changelog-guard` job replays release-plz's walk on every push to `main` and
+fails when a commit in the release window would not reach the changelog
+(`.github/scripts/changelog-commit-guard.sh`, runnable locally as `just changelog-guard`).
+The guard is intentionally **non-blocking** — it does not gate the release-plz job,
+because a release whose notes were already corrected by hand must stay shippable.
+
+No release-plz configuration fixes this: the commit set is assembled by release-plz
+itself before git-cliff ever sees it, so `[changelog]` options and a version pin are
+both irrelevant.
+
+**Decided:** merge commits are disabled on the repository, leaving squash (the
+default) and rebase — both fast-forward `main`, so the walk cannot fork. The
+alternative, *Require branches to be up to date before merging*, was rejected: it
+preserves merge commits but forces a full `nix flake check` re-run on both
+architectures every time another PR lands first, which is ~45 minutes of serialized
+waiting per dependabot batch.
+
+One consequence of squashing: a multi-commit PR takes its commit subject from the
+**PR title**, and that subject is what lands in `CHANGELOG.md` and the Release body.
+So PR titles are release notes — write them as Conventional Commit subjects.
+(Single-commit PRs keep their own subject; GitHub's `squash_title` is
+`COMMIT_OR_PR_TITLE`.)
+
 ## Considered Options
 
 - **A bespoke `cargo` CI matrix (rejected)** — would duplicate the toolchain, system
