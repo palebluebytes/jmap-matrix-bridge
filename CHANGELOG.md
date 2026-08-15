@@ -13,6 +13,7 @@ From v0.3.0 onward this file is maintained automatically by
 ### Fixed
 
 - *(images)* gate the 🖼️ reaction on the same permission check as show-images
+- *(cli)* give --quote-replies a CLI spelling that turns it off
 
 ### Other
 
