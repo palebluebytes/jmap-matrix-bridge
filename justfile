@@ -37,6 +37,10 @@ fix:
     cargo clippy --fix --allow-dirty --allow-staged
     cargo fmt
 
+# Check that release-plz's commit walk reaches every commit since the last tag
+changelog-guard ref="HEAD":
+    .github/scripts/changelog-commit-guard.sh {{ref}}
+
 # Update dependencies
 update:
     cargo update

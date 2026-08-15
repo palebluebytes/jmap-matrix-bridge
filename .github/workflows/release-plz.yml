@@ -20,6 +20,24 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # release-plz walks history one commit at a time and follows a single ancestry
+  # chain, so a merge whose branch was behind main makes it lose the other
+  # parent's commits — silently, from the changelog AND the Release notes. This
+  # job replays that walk and goes red when the release window contains a commit
+  # the changelog will not mention. It deliberately does NOT gate the job below:
+  # a partial changelog is still better than no release PR, and a release whose
+  # notes were already corrected by hand must stay shippable. See ADR-0008.
+  changelog-guard:
+    name: changelog commit guard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the guard needs the full history and the release tags
+      - run: .github/scripts/changelog-commit-guard.sh
+
   release-plz:
     name: release-plz
     runs-on: ubuntu-latest
