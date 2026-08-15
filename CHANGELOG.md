@@ -8,6 +8,25 @@ From v0.3.0 onward this file is maintained automatically by
 [release-plz](https://release-plz.dev) from the Conventional Commit history
 (see [ADR-0008](docs/adr/0008-ci-and-release-flow.md)).
 
+## [0.5.4](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.5.3...v0.5.4) - 2026-08-15
+
+### Fixed
+
+- *(images)* gate the 🖼️ reaction on the same permission check as show-images
+
+### Other
+
+- update flake.lock
+- Merge pull request #93 from palebluebytes/dependabot/cargo/futures-util-0.3.34
+- Merge pull request #91 from palebluebytes/dependabot/cargo/http-1.5.0
+- Merge pull request #95 from palebluebytes/dependabot/cargo/clap-4.6.6
+- Merge pull request #90 from palebluebytes/dependabot/cargo/base64-0.23.1
+- Merge pull request #88 from palebluebytes/dependabot/cargo/serde-1.0.229
+- Merge pull request #94 from palebluebytes/dependabot/cargo/thiserror-2.0.20
+- Merge pull request #87 from palebluebytes/dependabot/cargo/anyhow-1.0.104
+- Merge pull request #86 from palebluebytes/dependabot/cargo/jiff-0.2.35
+- *(install)* stop pinning a specific version in the examples
+
 ## [0.5.3](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.5.2...v0.5.3) - 2026-08-14
 
 ### Other
