@@ -8,6 +8,13 @@ From v0.3.0 onward this file is maintained automatically by
 [release-plz](https://release-plz.dev) from the Conventional Commit history
 (see [ADR-0008](docs/adr/0008-ci-and-release-flow.md)).
 
+## [0.5.6](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.5.5...v0.5.6) - 2026-08-24
+
+### Other
+
+- update flake.lock ([#106](https://github.com/palebluebytes/jmap-matrix-bridge/pull/106))
+- bump uuid from 1.24.0 to 1.24.1 ([#107](https://github.com/palebluebytes/jmap-matrix-bridge/pull/107))
+
 ## [0.5.5](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.5.4...v0.5.5) - 2026-08-15
 
 ### Other
