@@ -85,6 +85,20 @@
           staticBridge = muslPkgs.callPackage ./. {
             craneLib = inputs.crane.mkLib muslPkgs;
             crtStatic = true;
+
+            # sqlite's own test suite (`tool/../test/testrunner.tcl mdevtest`) fails
+            # under the musl cross, and since it is a buildInput of the crate it took
+            # the whole v0.5.7 release-artifacts run down with it — both arches, so
+            # the multi-arch manifest never ran and the release shipped no binaries.
+            # It executes at all only because this is a SAME-ARCHITECTURE cross:
+            # nixpkgs keeps `doCheck` on while the build platform can execute the
+            # host platform, which musl64-from-x86_64 (and aarch64-musl-from-aarch64)
+            # can, unlike a genuine cross. Nothing here is testing sqlite — the
+            # native build runs that suite upstream — so skip it rather than let an
+            # unrelated upstream failure gate our releases.
+            sqlite = muslPkgs.sqlite.overrideAttrs (_: {
+              doCheck = false;
+            });
           };
 
           # Minimal OCI image for non-Nix self-hosters (docker/podman/k8s). Wraps
