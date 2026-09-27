@@ -8,6 +8,12 @@ From v0.3.0 onward this file is maintained automatically by
 [release-plz](https://release-plz.dev) from the Conventional Commit history
 (see [ADR-0008](docs/adr/0008-ci-and-release-flow.md)).
 
+## [0.5.8](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.5.7...v0.5.8) - 2026-09-27
+
+### Fixed
+
+- *(static)* skip sqlite's test suite in the musl cross build ([#120](https://github.com/palebluebytes/jmap-matrix-bridge/pull/120))
+
 ## [0.5.7](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.5.6...v0.5.7) - 2026-09-27
 
 ### Other
