@@ -8,6 +8,19 @@ From v0.3.0 onward this file is maintained automatically by
 [release-plz](https://release-plz.dev) from the Conventional Commit history
 (see [ADR-0008](docs/adr/0008-ci-and-release-flow.md)).
 
+## [0.5.7](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.5.6...v0.5.7) - 2026-09-27
+
+### Other
+
+- bump ammonia from 4.1.4 to 4.2.0 ([#118](https://github.com/palebluebytes/jmap-matrix-bridge/pull/118))
+- bump rand from 0.10.2 to 0.10.3 ([#117](https://github.com/palebluebytes/jmap-matrix-bridge/pull/117))
+- bump jiff from 0.2.35 to 0.2.37 ([#116](https://github.com/palebluebytes/jmap-matrix-bridge/pull/116))
+- bump clap from 4.6.6 to 4.6.7 ([#115](https://github.com/palebluebytes/jmap-matrix-bridge/pull/115))
+- bump uuid from 1.24.1 to 1.26.1 ([#114](https://github.com/palebluebytes/jmap-matrix-bridge/pull/114))
+- bump tower-http from 0.7.0 to 0.7.1 ([#113](https://github.com/palebluebytes/jmap-matrix-bridge/pull/113))
+- bump aes-gcm from 0.11.0 to 0.11.1 ([#109](https://github.com/palebluebytes/jmap-matrix-bridge/pull/109))
+- update flake.lock ([#111](https://github.com/palebluebytes/jmap-matrix-bridge/pull/111))
+
 ## [0.5.6](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.5.5...v0.5.6) - 2026-08-24
 
 ### Other
