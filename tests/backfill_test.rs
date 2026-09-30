@@ -464,3 +464,260 @@ async fn test_backfill_batch_progresses_and_completes() {
         "Second backfill batch should indicate no more emails"
     );
 }
+
+/// Seven days in seconds — the window the tests below ask for.
+const WEEK_SECS: i64 = 7 * 24 * 60 * 60;
+
+/// Pull the `filter` object out of the single `Email/query` the poller sent.
+///
+/// Returns `None` when the query carried no filter at all, which is the
+/// unwindowed behaviour and a property worth asserting in its own right.
+async fn sole_email_query_filter(mock_server: &MockServer) -> Option<serde_json::Value> {
+    let requests = mock_server.received_requests().await.unwrap();
+    let mut filters = Vec::new();
+    for request in requests {
+        let Ok(json) = serde_json::from_slice::<serde_json::Value>(&request.body) else {
+            continue;
+        };
+        let Some(calls) = json.get("methodCalls").and_then(|c| c.as_array()) else {
+            continue;
+        };
+        for call in calls {
+            let call = call.as_array().unwrap();
+            if call[0].as_str().unwrap() == "Email/query" {
+                filters.push(call[1].get("filter").cloned());
+            }
+        }
+    }
+    assert_eq!(
+        filters.len(),
+        1,
+        "expected exactly one Email/query, saw {}",
+        filters.len()
+    );
+    filters.remove(0)
+}
+
+async fn mount_windowed_backfill_mocks(mock_server: &MockServer) {
+    // Permissive Email/query stub, PINNED: if the backfill stops querying, or
+    // queries twice, the assertion in sole_email_query_filter fails rather
+    // than the test passing on a mock nobody called.
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(|request: &wiremock::Request| {
+            let json: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let calls = json.get("methodCalls").unwrap().as_array().unwrap();
+            calls[0].as_array().unwrap()[0].as_str().unwrap() == "Email/query"
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Email/query", {
+                "accountId": "A123",
+                "ids": ["e1"],
+                "queryState": "q1",
+                "canCalculateChanges": false,
+                "position": 0
+            }, "0"]]
+        })))
+        .expect(1)
+        .mount(mock_server)
+        .await;
+
+    // Supporting stub only, deliberately unpinned: how many times the poller
+    // fetches bodies differs between the bootstrap and backfill paths, and it is
+    // not the property under test. The Email/query assertion above is the oracle.
+    Mock::given(method("POST"))
+        .and(path("/api"))
+        .and(|request: &wiremock::Request| {
+            let json: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+            let calls = json.get("methodCalls").unwrap().as_array().unwrap();
+            calls[0].as_array().unwrap()[0].as_str().unwrap() == "Email/get"
+        })
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "sessionState": "s1",
+            "methodResponses": [["Email/get", {
+                "accountId": "A123",
+                "state": "s1",
+                "list": [
+                    {
+                        "id": "e1", "threadId": "t1", "subject": "S1",
+                        "from": [{"name": "Sender", "email": "sender@example.com"}],
+                        "textBody": [{"partId": "p1", "type": "text/plain"}],
+                        "bodyValues": {"p1": {"value": "Body 1"}}
+                    }
+                ],
+                "notFound": []
+            }, "0"]]
+        })))
+        .mount(mock_server)
+        .await;
+}
+
+fn windowed_poller(
+    store: &Store,
+    matrix: MatrixClient,
+    client: jmap_client::client::Client,
+    window: Option<jiff::Span>,
+) -> JmapPoller {
+    JmapPoller::new(
+        "@user:localhost".to_string(),
+        Arc::new(client),
+        matrix,
+        store.clone(),
+        5,
+        true,
+        jmap_matrix_bridge::services::content::RenderMode::default(),
+    )
+    .with_backfill_window(window)
+}
+
+/// A persisted cutoff is authoritative: it is sent verbatim rather than being
+/// recomputed from `now`. This is the property that keeps a positional walk
+/// correct across the restarts a deploy causes.
+#[tokio::test]
+async fn test_backfill_window_uses_persisted_cutoff() {
+    let (mock_server, store, matrix, client) = setup_mock_server().await;
+    mount_windowed_backfill_mocks(&mock_server).await;
+
+    // A fixed anchor, far from `now`, so a recompute cannot coincidentally match.
+    store
+        .save_jmap_state("@user:localhost", "backfill_cutoff", "1700000000")
+        .await
+        .unwrap();
+
+    let poller = windowed_poller(&store, matrix, client, Some("7d".parse().unwrap()));
+    poller.backfill_batch(0).await.unwrap();
+
+    let filter = sole_email_query_filter(&mock_server)
+        .await
+        .expect("windowed backfill must send a filter");
+    let after = filter
+        .get("after")
+        .unwrap_or_else(|| panic!("no `after` in filter: {filter}"))
+        .as_str()
+        .unwrap();
+    let sent: jiff::Timestamp = after.parse().unwrap();
+    assert_eq!(
+        sent.as_second(),
+        1_700_000_000,
+        "the persisted cutoff must be sent verbatim, got {after}"
+    );
+
+    // And it must not have been overwritten.
+    assert_eq!(
+        store
+            .get_jmap_state("@user:localhost", "backfill_cutoff")
+            .await
+            .unwrap(),
+        Some("1700000000".to_string())
+    );
+}
+
+/// With no cutoff stored yet, the first batch anchors one from `now - window`,
+/// persists it, and queries with exactly that value.
+#[tokio::test]
+async fn test_backfill_window_anchors_and_persists_cutoff() {
+    let (mock_server, store, matrix, client) = setup_mock_server().await;
+    mount_windowed_backfill_mocks(&mock_server).await;
+
+    let before = jiff::Timestamp::now().as_second();
+    let poller = windowed_poller(&store, matrix, client, Some("7d".parse().unwrap()));
+    poller.backfill_batch(0).await.unwrap();
+
+    let persisted: i64 = store
+        .get_jmap_state("@user:localhost", "backfill_cutoff")
+        .await
+        .unwrap()
+        .expect("a window must persist its anchor")
+        .parse()
+        .unwrap();
+
+    let expected = before - WEEK_SECS;
+    assert!(
+        (persisted - expected).abs() <= 5,
+        "anchor {persisted} should be ~7d before {before} (expected {expected})"
+    );
+
+    // The wire value and the persisted anchor must be the same instant.
+    let filter = sole_email_query_filter(&mock_server).await.unwrap();
+    let sent: jiff::Timestamp = filter
+        .get("after")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(sent.as_second(), persisted);
+}
+
+/// The negative case: without a window the query must carry no filter at all, so
+/// the default stays a full-mailbox walk.
+#[tokio::test]
+async fn test_backfill_without_window_sends_no_filter() {
+    let (mock_server, store, matrix, client) = setup_mock_server().await;
+    mount_windowed_backfill_mocks(&mock_server).await;
+
+    let poller = windowed_poller(&store, matrix, client, None);
+    poller.backfill_batch(0).await.unwrap();
+
+    assert!(
+        sole_email_query_filter(&mock_server).await.is_none(),
+        "an unwindowed backfill must not filter by date"
+    );
+    assert_eq!(
+        store
+            .get_jmap_state("@user:localhost", "backfill_cutoff")
+            .await
+            .unwrap(),
+        None,
+        "no window means no anchor is written"
+    );
+}
+
+/// The window must bound the **bootstrap** page as well as the backfill batches.
+///
+/// They are one ascending walk, and `backfill_position` indexes into this very
+/// result set. Filtering only `backfill_batch` would bridge the oldest mail in the
+/// account — exactly what a window is set to avoid — and then resume backfill at
+/// index `sync_limit` of the *narrower* windowed set, skipping that many of the
+/// oldest in-window mails outright.
+#[tokio::test]
+async fn test_initial_sync_applies_backfill_window() {
+    let (mock_server, store, matrix, client) = setup_mock_server().await;
+    mount_windowed_backfill_mocks(&mock_server).await;
+
+    store
+        .save_jmap_state("@user:localhost", "backfill_cutoff", "1700000000")
+        .await
+        .unwrap();
+
+    let poller = windowed_poller(&store, matrix, client, Some("7d".parse().unwrap()));
+    poller.sync_emails().await.unwrap();
+
+    let filter = sole_email_query_filter(&mock_server)
+        .await
+        .expect("the bootstrap page must carry the window filter");
+    let sent: jiff::Timestamp = filter
+        .get("after")
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(sent.as_second(), 1_700_000_000);
+}
+
+/// …and without a window, the bootstrap page stays unfiltered.
+#[tokio::test]
+async fn test_initial_sync_without_window_sends_no_filter() {
+    let (mock_server, store, matrix, client) = setup_mock_server().await;
+    mount_windowed_backfill_mocks(&mock_server).await;
+
+    let poller = windowed_poller(&store, matrix, client, None);
+    poller.sync_emails().await.unwrap();
+
+    assert!(
+        sole_email_query_filter(&mock_server).await.is_none(),
+        "an unwindowed bootstrap must not filter by date"
+    );
+}

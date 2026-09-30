@@ -43,6 +43,8 @@ pub struct ClientManager {
     /// Default send-delay (undo) window in seconds, applied when a user hasn't
     /// set their own (ADR-0012). Operator-tunable; 5s out of the box.
     pub(crate) send_delay_default: i64,
+    /// Optional age limit on historical backfill (see [`JmapPoller::with_backfill_window`]).
+    pub(crate) backfill_window: Option<jiff::Span>,
 }
 
 /// Upper bound on the send-delay window — a typo can't hold mail for hours.
@@ -75,6 +77,7 @@ impl ClientManager {
             render_mode: RenderMode::default(),
             quote_replies: false,
             send_delay_default: DEFAULT_SEND_DELAY_SECS,
+            backfill_window: None,
         }
     }
 
@@ -116,6 +119,14 @@ impl ClientManager {
     #[must_use]
     pub const fn with_quote_replies(mut self, enabled: bool) -> Self {
         self.quote_replies = enabled;
+        self
+    }
+
+    /// Limit historical backfill to mail received within `window`. `None` (the
+    /// default) backfills the whole mailbox.
+    #[must_use]
+    pub const fn with_backfill_window(mut self, window: Option<jiff::Span>) -> Self {
+        self.backfill_window = window;
         self
     }
 
@@ -283,7 +294,8 @@ impl ClientManager {
             self.sync_limit,
             self.bridge_mailboxes,
             self.render_mode,
-        );
+        )
+        .with_backfill_window(self.backfill_window);
         poller.poll().await
     }
 
@@ -340,7 +352,8 @@ impl ClientManager {
             self.sync_limit,
             self.bridge_mailboxes,
             self.render_mode,
-        );
+        )
+        .with_backfill_window(self.backfill_window);
 
         self.clients
             .write()

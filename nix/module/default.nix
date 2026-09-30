@@ -113,6 +113,24 @@ in
       description = "The logging level for the bridge (error, warn, info, debug, trace)";
     };
 
+    backfillWindow = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "1mo";
+      description = ''
+        Limit historical backfill to mail received within this span, e.g. `1w`,
+        `30d`, `6mo`, `1 year`; ISO 8601 (`P30D`) also works. `null` (the default)
+        backfills the entire mailbox.
+
+        Beware: in this format `1m` is one MINUTE — a month is `1mo`.
+
+        Only historical backfill is limited; live sync always bridges new mail.
+        The cutoff is anchored when a walk starts and persisted, so restarts do
+        not shift it. Set this before first login on a large mailbox — it is what
+        stops years of archived mail becoming one Matrix room per thread.
+      '';
+    };
+
     bridgeMailboxes = lib.mkOption {
       type = lib.types.bool;
       default = false;
@@ -260,6 +278,9 @@ in
         BRIDGE_MAILBOXES = lib.boolToString cfg.bridgeMailboxes;
         RENDER_MODE = cfg.renderMode;
         QUOTE_REPLIES = lib.boolToString cfg.quoteReplies;
+      }
+      // lib.optionalAttrs (cfg.backfillWindow != null) {
+        BACKFILL_WINDOW = cfg.backfillWindow;
       };
 
       serviceConfig = {

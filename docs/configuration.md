@@ -26,6 +26,7 @@ the ones that need more than a line.
 | `--quote-replies [BOOL]` (`QUOTE_REPLIES`) | `true` | Quote the parent in outbound replies (email-only, never shown in Matrix) — see [Boolean flags](#boolean-flags) |
 | `--bridge-mailboxes [BOOL]` (`BRIDGE_MAILBOXES`) | `false` | Also mirror JMAP mailboxes (Inbox/Sent/…) as their own rooms |
 | `--jmap-sync-limit` (`JMAP_SYNC_LIMIT`) | `10` | Emails fetched per JMAP query page during sync and backfill |
+| `--backfill-window SPAN` (`BACKFILL_WINDOW`) | *(unlimited)* | Limit **historical** backfill to mail received within this span (`1w`, `30d`, `6mo`, `1 year`, `P30D`). See [Backfill window](#backfill-window) |
 | `--permission KEY=LEVEL` | *(repeatable)* | Grant bridge access — see [Permissions](#permissions) |
 | `--user SPEC` | *(repeatable)* | Declaratively provision a user — see [Declarative provisioning](#declarative-provisioning) |
 | `--log-level` (`LOG_LEVEL`) | `info` | `error` \| `warn` \| `info` \| `debug` \| `trace` (global flag) |
@@ -121,3 +122,50 @@ startup with one repeatable `--user` flag per user — a comma-separated list of
 The NixOS module ([`nix/module/README.md`](../nix/module/README.md)) exposes the
 common options directly. Anything it does not model — permissions and the
 double-puppet secret among them — is reachable through its `extraArgs` option.
+
+### Backfill window
+
+By default the bridge backfills the **entire** mailbox: `src/sync/backfill.rs`
+walks every email oldest-first and gives each thread its own Matrix room. On a
+long-lived or freshly-imported mailbox that is thousands of rooms.
+
+`--backfill-window` / `BACKFILL_WINDOW` caps how far back that walk reaches:
+
+```bash
+jmap-matrix-bridge run --backfill-window 1mo   # the last month
+jmap-matrix-bridge run --backfill-window 2w    # the last fortnight
+jmap-matrix-bridge run --backfill-window all   # explicit default: everything
+```
+
+Accepted spellings are jiff's friendly durations (`1w`, `30d`, `6mo`, `1 year`,
+`3d 4h`) and ISO 8601 (`P30D`). An unparseable or non-positive value **fails at
+startup** rather than silently backfilling everything.
+
+> **`1m` is one minute, not one month.** A month is `1mo`. This catches people
+> out, so the bridge logs the window it resolved at startup — check that line.
+
+The window bounds **both** halves of the historical walk: the bootstrap page that
+`sync_emails` fetches on first login *and* the `backfill_batch` pages that follow.
+They are one ascending walk — `backfill_position` is an index into that same
+filtered result set — so bounding only one half would bridge the oldest mail in the
+account and then skip that many of the oldest in-window mails.
+
+Two things it deliberately does *not* do:
+
+- **It never limits live sync.** New mail is always bridged, whatever the
+  window. This only bounds the historical catch-up.
+- **It does not filter by mailbox or keyword.** A window is a date floor, not a
+  content filter.
+
+The cutoff is computed once, when a backfill walk starts, and **persisted** (the
+`backfill_cutoff` key in `jmap_state`) until that walk completes. That is not an
+optimisation: backfill pages by *position* within the filtered result set, so a
+cutoff that drifted forward between batches would shrink the set from the front
+and leave the saved position pointing past mail it had never reached — silently
+skipping it. Restarts are routine (every deploy restarts the unit, and a large
+mailbox takes hours at the default `--jmap-sync-limit` of 10 with its 5s
+throttle), so the anchor has to survive them.
+
+Changing the window on an **in-progress** walk therefore has no effect until that
+walk finishes. To re-anchor, stop the bridge and delete the `backfill_cutoff` row
+for the user.
