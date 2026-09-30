@@ -25,6 +25,9 @@ pub struct JmapPoller {
     pub(crate) bridge_mailboxes: bool,
     /// How email bodies are rendered into Matrix messages (plain / links / rich).
     pub(crate) render_mode: RenderMode,
+    /// Optional age limit on historical backfill: only mail received within this
+    /// span of the walk's start is bridged. `None` backfills the whole mailbox.
+    pub(crate) backfill_window: Option<jiff::Span>,
 }
 
 impl std::fmt::Debug for JmapPoller {
@@ -34,6 +37,10 @@ impl std::fmt::Debug for JmapPoller {
             .field("store", &self.store)
             .field("matrix_user_id", &self.matrix_user_id)
             .field("sync_limit", &self.sync_limit)
+            .field(
+                "backfill_window",
+                &self.backfill_window.map(|w| w.to_string()),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -57,7 +64,16 @@ impl JmapPoller {
             sync_limit,
             bridge_mailboxes,
             render_mode,
+            backfill_window: None,
         }
+    }
+
+    /// Limit historical backfill to mail received within `window` of the walk's
+    /// start. `None` (the default) backfills the entire mailbox.
+    #[must_use]
+    pub const fn with_backfill_window(mut self, window: Option<jiff::Span>) -> Self {
+        self.backfill_window = window;
+        self
     }
 
     /// Primary entry point for the poller. Synchronizes mailboxes and emails.

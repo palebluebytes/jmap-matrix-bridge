@@ -23,6 +23,7 @@ Import it from the flake as `nixosModules.jmap-bridge`; the overlay supplies
 | `encryptionKeyFile` | null or str | `null` | File with a 32-byte base64 AES-256 key; enables credential encryption at rest. |
 | `logLevel` | str | `"info"` | `error` \| `warn` \| `info` \| `debug` \| `trace`. |
 | `bridgeMailboxes` | bool | `false` | Also mirror JMAP mailboxes as their own Matrix rooms. |
+| `backfillWindow` | null or str | `null` | Limit historical backfill to this span, e.g. `"1mo"`. `null` backfills everything. |
 | `renderMode` | enum | `"links"` | Email body rendering: `plain`, `links`, or `rich`. |
 | `quoteReplies` | bool | `true` | Quote the parent in outbound replies (email-only). |
 | `extraArgs` | list of str | `[]` | Extra args appended to the `run` invocation (e.g. `[ "--jmap-sync-limit" "25" ]`). |

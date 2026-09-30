@@ -117,7 +117,19 @@ impl JmapPoller {
                 // backdated origin_server_ts. This first page is the oldest
                 // emails; the backfill task walks forward to the newest, which
                 // therefore land on top. See backfill::backfill_batch.
+                //
+                // The backfill window applies HERE TOO, and must: this page and
+                // the backfill batches are one ascending walk, and
+                // `backfill_position` below is an index into *this* result set.
+                // Filtering only the backfill query would bridge the oldest mail
+                // in the account (precisely what the window excludes) and then
+                // start backfill at index `sync_limit` of the narrower windowed
+                // set, silently skipping that many of the oldest in-window mails.
+                let cutoff = self.resolve_backfill_cutoff().await;
                 let email_query = request.query_email();
+                if let Some(cutoff) = cutoff {
+                    email_query.filter(jmap_client::email::query::Filter::after(cutoff));
+                }
                 email_query
                     .sort([jmap_client::email::query::Comparator::received_at().ascending()])
                     .limit(self.sync_limit);

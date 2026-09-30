@@ -2,6 +2,10 @@ use super::JmapPoller;
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
+/// `jmap_state` key holding the persisted `receivedAt` floor of a windowed
+/// backfill, as epoch seconds. Shares the lifecycle of `backfill_position`.
+const BACKFILL_CUTOFF_KEY: &str = "backfill_cutoff";
+
 impl JmapPoller {
     /// Performs a background backfill catch-up process for older emails.
     /// It queries one batch of emails at a time and sleeps to throttle server load.
@@ -67,6 +71,13 @@ impl JmapPoller {
                             .store
                             .delete_jmap_state(&self.matrix_user_id, "backfill_position")
                             .await;
+                        // Drop the window anchor too, so a later walk (after a
+                        // `matrix-reset`, say) anchors afresh rather than reusing
+                        // a cutoff from months ago.
+                        let _ = self
+                            .store
+                            .delete_jmap_state(&self.matrix_user_id, BACKFILL_CUTOFF_KEY)
+                            .await;
                         break;
                     }
                     // Wait 5 seconds between batches to throttle load
@@ -80,11 +91,81 @@ impl JmapPoller {
         }
     }
 
+    /// Resolve the `receivedAt` floor for a windowed backfill, `None` when the
+    /// operator set no window.
+    ///
+    /// The cutoff is **persisted on first use** rather than recomputed per batch,
+    /// because the walk is positional: `position` indexes into the *filtered*
+    /// result set, so a cutoff that crept forward between batches would shrink the
+    /// set from the front and make the saved position point past mail it had not
+    /// reached yet — silently skipping it. Restarts are the common case, not a rare
+    /// one (every deploy restarts the unit, and at the default `sync_limit` of 10
+    /// with a 5s throttle a large mailbox takes hours), so an in-memory anchor
+    /// would not have been enough.
+    pub(crate) async fn resolve_backfill_cutoff(&self) -> Option<i64> {
+        let window = self.backfill_window?;
+
+        match self
+            .store
+            .get_jmap_state(&self.matrix_user_id, BACKFILL_CUTOFF_KEY)
+            .await
+        {
+            Ok(Some(saved)) => match saved.parse::<i64>() {
+                Ok(cutoff) => return Some(cutoff),
+                Err(e) => {
+                    warn!(user = %self.matrix_user_id, error = %e, saved = %saved, "Unparseable backfill cutoff; re-anchoring");
+                }
+            },
+            Ok(None) => {}
+            Err(e) => {
+                // Without the store we cannot anchor stably. Fall through and
+                // anchor from now: a fresh cutoff is far better than dropping the
+                // window and replaying the entire mailbox into Matrix.
+                warn!(user = %self.matrix_user_id, error = %e, "Failed to read backfill cutoff; anchoring from now");
+            }
+        }
+
+        // Calendar units (`1mo`, `1y`) are not fixed numbers of seconds, so the
+        // subtraction has to happen on a zoned datetime rather than a bare
+        // timestamp. UTC is deliberate: the anchor is machine state, not something
+        // a user reads, and a DST-shifted local zone would only add ambiguity.
+        let now = jiff::Timestamp::now().to_zoned(jiff::tz::TimeZone::UTC);
+        let cutoff = match now.checked_sub(window) {
+            Ok(t) => t.timestamp().as_second(),
+            Err(e) => {
+                warn!(user = %self.matrix_user_id, error = %e, "Backfill window overflowed; backfilling without a window");
+                return None;
+            }
+        };
+
+        if let Err(e) = self
+            .store
+            .save_jmap_state(
+                &self.matrix_user_id,
+                BACKFILL_CUTOFF_KEY,
+                &cutoff.to_string(),
+            )
+            .await
+        {
+            warn!(user = %self.matrix_user_id, error = %e, "Failed to persist backfill cutoff; it will be re-anchored next restart");
+        }
+        info!(user = %self.matrix_user_id, cutoff, window = %format_args!("{window:#}"), "Anchored windowed backfill");
+        Some(cutoff)
+    }
+
     /// Backfills a single batch of emails from the specified position.
     /// Returns `Ok(true)` if there might be more emails to fetch, or `Ok(false)` if reached the end.
     pub async fn backfill_batch(&self, pos: usize) -> Result<bool> {
+        let cutoff = self.resolve_backfill_cutoff().await;
+
         let mut request = self.client.build();
         let email_query = request.query_email();
+        if let Some(cutoff) = cutoff {
+            // JMAP `after` is `receivedAt >= cutoff`, matching the sort key below —
+            // deliberately not `sentAfter`, which filters on the Date: header and
+            // would disagree with the ordering we page by.
+            email_query.filter(jmap_client::email::query::Filter::after(cutoff));
+        }
         // Ascending (oldest-first): Element's room list orders by the server
         // stream position of each room's last message (sliding-sync bump_stamp),
         // NOT the message's origin_server_ts. Bridging oldest-first means the

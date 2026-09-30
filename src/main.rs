@@ -95,6 +95,17 @@ enum Commands {
         #[arg(long, env = "JMAP_SYNC_LIMIT", default_value = "10")]
         jmap_sync_limit: usize,
 
+        /// Limit historical backfill to mail received within this span, e.g.
+        /// `1w`, `30d`, `6mo`, `1 year`. ISO 8601 (`P30D`) also works. Omit, or
+        /// pass `all`, to backfill the entire mailbox (the default).
+        ///
+        /// Beware: in this format `1m` is one MINUTE. A month is `1mo`.
+        ///
+        /// Only historical backfill is limited — live sync always bridges new
+        /// mail regardless of this setting.
+        #[arg(long, env = "BACKFILL_WINDOW", value_name = "SPAN")]
+        backfill_window: Option<String>,
+
         /// Mirror JMAP mailboxes (Inbox/Sent/…) as their own Matrix rooms.
         /// Off by default — email lives in per-contact/per-thread rooms.
         ///
@@ -343,6 +354,7 @@ async fn main() -> anyhow::Result<()> {
             jmap_token_file,
             jmap_url,
             jmap_sync_limit,
+            backfill_window,
             bridge_mailboxes,
             render_mode,
             quote_replies,
@@ -367,6 +379,20 @@ async fn main() -> anyhow::Result<()> {
             let render_mode: jmap_matrix_bridge::services::content::RenderMode = render_mode
                 .parse()
                 .map_err(|e: String| anyhow::anyhow!(e))?;
+
+            // Parsed here so a typo fails the unit at startup, rather than
+            // quietly backfilling the entire mailbox into Matrix.
+            let backfill_window = jmap_matrix_bridge::config::parse_backfill_window(
+                backfill_window.as_deref().unwrap_or_default(),
+            )
+            .context("invalid --backfill-window")?;
+            if let Some(w) = backfill_window {
+                // `{:#}` is jiff's friendly format, so the log echoes what the
+                // operator typed (`1mo`) rather than ISO 8601 (`P1M`).
+                info!("Historical backfill limited to the last {w:#}");
+            } else {
+                info!("Historical backfill is unlimited (no --backfill-window set)");
+            }
 
             // Default-deny access control (ADR-0010). Empty → local domain gets
             // `user`, everyone else denied.
@@ -452,7 +478,8 @@ async fn main() -> anyhow::Result<()> {
                     .with_bridge_mailboxes(bridge_mailboxes)
                     .with_render_mode(render_mode)
                     .with_quote_replies(quote_replies)
-                    .with_send_delay_default(send_delay_default),
+                    .with_send_delay_default(send_delay_default)
+                    .with_backfill_window(backfill_window),
             );
 
             // Register bot user to ensure it exists in Conduit

@@ -44,5 +44,5 @@ The JMAP `EmailSubmission` step that actually hands a message off for delivery. 
 _Avoid_: send, delivery, dispatch (when you specifically mean the EmailSubmission step)
 
 **Backfill**:
-The import of a mailbox's pre-existing historical email into Matrix Rooms, run oldest-first and separately from live sync.
+The import of a mailbox's pre-existing historical email into Matrix Rooms, run oldest-first and separately from live sync. Optionally bounded to a recent window (`--backfill-window`); unbounded by default.
 _Avoid_: sync, history import, catch-up
