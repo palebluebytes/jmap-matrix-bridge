@@ -8,6 +8,16 @@ From v0.3.0 onward this file is maintained automatically by
 [release-plz](https://release-plz.dev) from the Conventional Commit history
 (see [ADR-0008](docs/adr/0008-ci-and-release-flow.md)).
 
+## [0.5.9](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.5.8...v0.5.9) - 2026-09-30
+
+### Added
+
+- *(backfill)* bound historical backfill to an optional time window ([#123](https://github.com/palebluebytes/jmap-matrix-bridge/pull/123))
+
+### Other
+
+- update flake.lock ([#122](https://github.com/palebluebytes/jmap-matrix-bridge/pull/122))
+
 ## [0.5.8](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.5.7...v0.5.8) - 2026-09-27
 
 ### Fixed
