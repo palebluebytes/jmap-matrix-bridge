@@ -1058,6 +1058,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "encodify"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "798c447647dd23f673748f2b868ef309a01dd86aaae999182559d36f06ac82f0"
+dependencies = [
+ "memchr",
+ "simdutf8",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1953,14 +1963,14 @@ dependencies = [
 
 [[package]]
 name = "jmap-client"
-version = "0.4.2"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4deab22e057d24e32122f0fc6e2d667a124fdd6a0d8ef3ed4f8a89923c11084f"
+checksum = "f5b5bc66252cc8e779ef1238f40ab93971d54ad00b5d7afb5c1d447a9647ed62"
 dependencies = [
  "ahash",
  "async-stream",
- "base64 0.22.1",
  "chrono",
+ "encodify",
  "futures-util",
  "maybe-async",
  "parking_lot",
