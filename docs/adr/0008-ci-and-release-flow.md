@@ -165,6 +165,17 @@ So PR titles are release notes — write them as Conventional Commit subjects.
   (it only governs the default token). One non-secret step remains: make the package
   public on the first `ghcr.io` push. These are listed in the CI/Releases section of
   `AGENTS.md`.
+- **The release closure is PINNED in Cachix, not merely pushed** (added 2026-11-09).
+  A push is subject to the cache's retention GC, so a consumer that pins a release tag
+  loses its substitute about a month after the tag is cut — twice observed (v0.5.6 cut
+  2026-08-24 was a 404 by 2026-09-27; v0.5.9 cut 2026-09-30 was a 404 by 2026-11-09),
+  each time turning a downstream deploy into a silent from-source matrix-sdk/sqlx build.
+  `release-artifacts.yml` therefore builds `packages.<system>.default` explicitly and
+  runs `cachix pin palebluebytes release-<system> <path> --keep-revisions 3`. Two
+  properties matter: the pin is exempt from GC, and it names the path CONSUMERS use —
+  which previously reached the cache only as an incidental dependency of
+  `checks.<system>.jmap-bridge`. Re-warm an existing tag with a `workflow_dispatch`
+  against its ref; the workflow already supports that.
 - **The VM round-trip test runs on every PR.** It is the slow part; with Cachix the
   bridge build is warm and only the VM boot remains. If PR latency becomes a problem,
   gate the VM check to `push: main` rather than dropping it.
