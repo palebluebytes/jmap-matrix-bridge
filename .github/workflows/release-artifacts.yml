@@ -41,6 +41,38 @@ jobs:
           name: palebluebytes
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
+      # ── Keep the release closure substitutable (the reason this step exists) ──
+      # Consumers pin this crate by RELEASE TAG and expect `packages.<system>.default`
+      # to be a substitute, not a build: without it a deploy silently compiles the
+      # matrix-sdk/sqlx closure from source — roughly half an hour, no error, just a
+      # host that will not come up for a while.
+      #
+      # A `cachix push` does NOT buy that, and this has now been learned twice. Pushed
+      # paths are subject to the cache's retention GC, so a pinned tag goes cold about a
+      # month after it is cut:
+      #   • v0.5.6 — cut 2026-08-24, 404 by 2026-09-27
+      #   • v0.5.9 — cut 2026-09-30, measured 200 the same day, 404 by 2026-11-09
+      # Each time the consumer's only remedy was to pin a NEWER tag, which works
+      # exactly until releases pause — and v0.5.9 was still the newest when it expired,
+      # so that remedy had run out.
+      #
+      # A NAMED PIN is exempt from GC, and `--keep-revisions` keeps the previous ones
+      # alive too, so a consumer sitting a release or two behind is still substitutable.
+      # The pin name is per-arch and REPLACED on each release, so this never accumulates.
+      #
+      # ⚠ `.#packages.<system>.default` specifically, and it is NOT what the rest of
+      # this job builds — `.#static` is the musl binary for the Release asset. The
+      # NixOS module consumes `packages.<system>.default`, and until now that path only
+      # ever reached the cache as an incidental dependency of `checks.<system>.jmap-bridge`
+      # in the CI workflow. Naming it here is what makes "the thing consumers pin" and
+      # "the thing we keep" the same path.
+      - name: Push and pin the NixOS package closure
+        run: |
+          p=$(nix build --no-link --print-out-paths .#packages.${{ matrix.system }}.default)
+          echo "pinning $p"
+          cachix push palebluebytes "$p"
+          cachix pin palebluebytes "release-${{ matrix.system }}" "$p" --keep-revisions 3
+
       # ── Static binary → GitHub Release asset ───────────────────────────────
       - name: Build static binary
         run: nix build .#static -L
