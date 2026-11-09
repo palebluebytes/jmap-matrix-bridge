@@ -8,6 +8,12 @@ From v0.3.0 onward this file is maintained automatically by
 [release-plz](https://release-plz.dev) from the Conventional Commit history
 (see [ADR-0008](docs/adr/0008-ci-and-release-flow.md)).
 
+## [0.5.10](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.5.9...v0.5.10) - 2026-11-09
+
+### Other
+
+- *(release)* pin the release closure in Cachix instead of only pushing it ([#139](https://github.com/palebluebytes/jmap-matrix-bridge/pull/139))
+
 ## [0.5.9](https://github.com/palebluebytes/jmap-matrix-bridge/compare/v0.5.8...v0.5.9) - 2026-09-30
 
 ### Added
